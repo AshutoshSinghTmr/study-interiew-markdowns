@@ -134,6 +134,46 @@ Filters execute before interceptors. Use filters for cross-cutting concerns such
 6. The controller returns a value.
 7. A `HandlerMethodReturnValueHandler` processes the return value — `@ResponseBody`/`ResponseEntity` values are serialized by an `HttpMessageConverter`, while view names are resolved by a `ViewResolver` — and the response is committed.
 
+## DispatcherServlet Initialization
+
+On startup `DispatcherServlet.initStrategies` wires a set of **special beans** from the context (falling back to `DispatcherServlet.properties` defaults): `HandlerMapping`, `HandlerAdapter`, `HandlerExceptionResolver`, `ViewResolver`, `LocaleResolver`, `ThemeResolver`, `MultipartResolver`, and `FlashMapManager`. For annotated controllers, `RequestMappingHandlerMapping` builds a registry of `RequestMappingInfo -> HandlerMethod`, and `RequestMappingHandlerAdapter` invokes the method using its `HandlerMethodArgumentResolver`s and `HandlerMethodReturnValueHandler`s.
+
+## Message Converters and Content Negotiation
+
+Request/response bodies are handled by an ordered list of `HttpMessageConverter`s (Jackson for JSON, Jackson XML, `String`, byte array, form). The chosen converter depends on the request `Content-Type`/`Accept` and the `produces`/`consumes` of the mapping. `ContentNegotiationManager` decides the response media type — by `Accept` header by default (path-extension negotiation is off in Boot). Register custom converters or negotiation rules via `WebMvcConfigurer`.
+
+## Validation Beyond `@Valid`
+
+* **Groups**: `@Validated(OnCreate.class)` runs only constraints in that group, so create vs update can differ.
+* **Cross-field**: a class-level custom `ConstraintValidator` validates relationships between fields.
+* **Method validation**: `@Validated` on a bean validates method params/returns (`ConstraintViolationException`).
+* **Errors**: `@RequestBody` failures raise `MethodArgumentNotValidException`; simple `@RequestParam`/`@PathVariable` failures raise `HandlerMethodValidationException` (Boot 3.2). Both should map to a 400.
+
+## Error Handling with `ProblemDetail` (RFC 7807)
+
+Boot 3 supports RFC 7807 responses (`spring.mvc.problemdetails.enabled=true`, or return a `ProblemDetail`). Extend `ResponseEntityExceptionHandler` to convert Spring MVC exceptions to `ProblemDetail`, and customize the fallback `/error` mapping via an `ErrorController`/`ErrorAttributes`. `ProblemDetail` carries `type`, `title`, `status`, `detail`, `instance`, plus custom properties.
+
+## HTTP Caching and Conditional Requests
+
+Return validators to avoid re-sending unchanged bodies: `ResponseEntity.ok().eTag(v).cacheControl(CacheControl.maxAge(Duration.ofMinutes(5))).body(...)`, or enable `ShallowEtagHeaderFilter`. Spring honors `If-None-Match`/`If-Modified-Since` and returns `304 Not Modified` when appropriate.
+
+## Declarative and Fluent HTTP Clients
+
+* **`RestClient`** (Boot 3.2) — synchronous fluent client that supersedes `RestTemplate` for new code.
+* **`WebClient`** — non-blocking client (usable in MVC for parallel calls).
+* **HTTP interfaces** — declare `@HttpExchange` methods and build a proxy with `HttpServiceProxyFactory` over `RestClient`/`WebClient`.
+
+```java
+interface CatalogClient {
+    @GetExchange("/products/{id}")
+    Product byId(@PathVariable String id);
+}
+```
+
+## Async Request Processing
+
+Return `Callable<T>`, `DeferredResult<T>`, or `WebAsyncTask<T>` to release the servlet thread while work happens elsewhere; stream with `ResponseBodyEmitter`, `SseEmitter` (server-sent events), or `StreamingResponseBody`. This scales long-running or push endpoints without tying up the container's request threads.
+
 ## Interview Q&A
 
 **Q: What is the difference between `@Controller` and `@RestController`?**
@@ -153,6 +193,21 @@ A: Filters run in the servlet container before/after `DispatcherServlet` and see
 
 **Q: How should you version a REST API?**
 A: Common options are URI versioning (`/api/v1/...`), a custom header, or content negotiation via the `Accept` media type; URI versioning is the simplest and most cache-friendly.
+
+**Q: How does content negotiation pick JSON vs XML?**
+A: `ContentNegotiationManager` inspects the request `Accept` header (path-extension and param strategies are off by default in Boot) and matches it against the mapping's `produces` and the available `HttpMessageConverter`s; JSON via Jackson is the default.
+
+**Q: What is the difference between `@RequestParam`, `@PathVariable`, and `@RequestBody`?**
+A: `@RequestParam` binds query/form parameters, `@PathVariable` binds URI template segments, and `@RequestBody` deserializes the request body (via a message converter) into an object.
+
+**Q: How do you return a specific status code and headers cleanly?**
+A: Return `ResponseEntity<T>` (e.g. `ResponseEntity.status(HttpStatus.CREATED).header(...).body(dto)`), or use `@ResponseStatus` on a method/exception for a fixed status.
+
+**Q: How do you stream a large response or handle file uploads?**
+A: Stream with `StreamingResponseBody`, `ResponseBodyEmitter`, or `SseEmitter`; accept uploads with `@RequestPart`/`MultipartFile` (configure `spring.servlet.multipart` limits).
+
+**Q: `RestTemplate`, `WebClient`, or `RestClient` — which should you use?**
+A: For new blocking code use `RestClient` (Boot 3.2, fluent, supersedes `RestTemplate`); use `WebClient` for reactive or high-concurrency parallel calls. `RestTemplate` is maintenance-only.
 
 ## Interview Notes
 

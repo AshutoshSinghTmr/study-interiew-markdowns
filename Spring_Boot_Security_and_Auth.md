@@ -125,6 +125,50 @@ For async execution, use `SecurityContextHolder.MODE_INHERITABLETHREADLOCAL` or 
 
 Spring Security publishes authentication events and can be extended with `AuthenticationEventPublisher` for auditing.
 
+## The Filter Chain, Ordered
+
+`FilterChainProxy` picks the first `SecurityFilterChain` whose `securityMatcher` matches, then runs its ordered filters. A representative order: `SecurityContextHolderFilter` (loads the `SecurityContext`), `HeaderWriterFilter`, `CorsFilter`, `CsrfFilter`, `LogoutFilter`, authentication filters (`UsernamePasswordAuthenticationFilter`, `BearerTokenAuthenticationFilter`), `AnonymousAuthenticationFilter`, `ExceptionTranslationFilter`, and finally `AuthorizationFilter`. Define multiple chains (each with its own `securityMatcher` and `@Order`) to apply different rules to, say, `/api/**` vs the UI.
+
+## Authentication Architecture
+
+`AuthenticationManager` (usually `ProviderManager`) delegates to a list of `AuthenticationProvider`s until one authenticates:
+
+* `DaoAuthenticationProvider` — `UserDetailsService` + `PasswordEncoder`.
+* `JwtAuthenticationProvider` / resource-server decoders — validate tokens.
+
+The resulting `Authentication` (principal, authorities, authenticated flag) is stored in the `SecurityContext`. In Security 6 the context is persisted explicitly via a `SecurityContextRepository` and loaded by `SecurityContextHolderFilter` (the old `SecurityContextPersistenceFilter` is gone; saving is explicit).
+
+## Authorization
+
+Security 6 uses `AuthorizationManager` (replacing `AccessDecisionManager`). URL rules come from `authorizeHttpRequests(...)` with request matchers; method rules from SpEL:
+
+```java
+@PreAuthorize("hasRole('ADMIN') or #ownerId == authentication.name")
+Order get(String ownerId) { ... }
+```
+
+Distinguish **roles** (`ROLE_` prefix, `hasRole`) from raw **authorities** (`hasAuthority`). For per-object rules use domain-object security (ACLs). RBAC assigns permissions by role; ABAC decides from attributes (owner, tenant, time) — expressible in SpEL or a custom `AuthorizationManager`.
+
+## OAuth2 and OIDC
+
+Three roles: **resource server** (validates access tokens), **client** (obtains tokens for users), and **authorization server** (Spring Authorization Server). Common grants: **authorization code + PKCE** (web/SPA login) and **client credentials** (machine-to-machine). OIDC adds an **ID token** describing the user. A `JwtDecoder` validates signature (via the issuer's JWK set), issuer, audience, and expiry; **opaque** tokens are validated by calling the provider's introspection endpoint instead.
+
+## Method Security Internals
+
+`@EnableMethodSecurity` registers `AuthorizationManager`-based interceptors (`AuthorizationManagerBeforeMethodInterceptor`, etc.) that evaluate `@PreAuthorize`/`@PostAuthorize`/`@PreFilter`/`@PostFilter`. Because it is proxy-based, the AOP self-invocation caveat applies.
+
+## Sessions, CSRF, CORS, Headers
+
+Choose `SessionCreationPolicy.STATELESS` for token APIs, or session-based auth with concurrency control and session-fixation protection for server-rendered apps. Enable CSRF for cookie-based browser flows (use `CookieCsrfTokenRepository` for SPAs) and disable it for stateless token APIs. Configure CORS (preflight handling) via a `CorsConfigurationSource`, and set security headers (HSTS, CSP, `X-Frame-Options`) through the headers DSL.
+
+## Passwords and Reactive Security
+
+Store passwords with `DelegatingPasswordEncoder` (bcrypt/argon2) and enable `upgradeEncoding` to re-hash on login. In WebFlux, the equivalents are `SecurityWebFilterChain`, `ServerHttpSecurity`, and `ReactiveSecurityContextHolder` (context flows via the Reactor context, not thread-locals).
+
+## Mapping to OWASP
+
+The stack directly mitigates several OWASP Top 10 items: strong authentication and session management (broken auth), method/URL authorization (broken access control), CSRF tokens (CSRF), security headers/CSP (misconfiguration, XSS), and password hashing/TLS (cryptographic failures). Keep dependencies patched and secrets externalized.
+
 ## Interview Q&A
 
 **Q: How is Spring Security configured in Spring Security 6 (no `WebSecurityConfigurerAdapter`)?**
@@ -144,6 +188,21 @@ A: It protects browser session-cookie flows from forged state-changing requests.
 
 **Q: How does `DelegatingPasswordEncoder` work?**
 A: It stores an algorithm-id prefix like `{bcrypt}` with each hash, so it can verify legacy encodings and upgrade the default algorithm without breaking existing passwords.
+
+**Q: What is the difference between a role and an authority?**
+A: A role is just an authority conventionally prefixed with `ROLE_`. `hasRole('ADMIN')` checks `ROLE_ADMIN`; `hasAuthority('ORDER_READ')` checks the raw authority string.
+
+**Q: How does JWT validation differ from opaque-token validation?**
+A: A JWT is self-contained and validated locally by a `JwtDecoder` (signature via the JWK set, issuer, audience, expiry); an opaque token carries no claims, so the resource server calls the provider's introspection endpoint to validate it.
+
+**Q: When do you use authorization code + PKCE versus client credentials?**
+A: Authorization code + PKCE is for user login from web apps/SPAs (no client secret in the browser); client credentials is for machine-to-machine calls with no user.
+
+**Q: How and why would you define multiple `SecurityFilterChain` beans?**
+A: Give each a `securityMatcher` and `@Order` so, for example, `/api/**` uses stateless JWT while the UI uses form login and sessions — different rules without conflicting configuration.
+
+**Q: How does `@PreAuthorize` get enforced?**
+A: `@EnableMethodSecurity` registers an `AuthorizationManager`-based method interceptor (AOP) that evaluates the SpEL before the method runs; being proxy-based, it is subject to the self-invocation caveat.
 
 ## Interview Notes
 

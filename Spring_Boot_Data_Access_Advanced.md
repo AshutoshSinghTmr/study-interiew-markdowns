@@ -150,6 +150,45 @@ Implement soft deletes with a boolean flag and Hibernate annotations like `@Wher
 
 Use JPA lifecycle callbacks (`@PrePersist`, `@PostLoad`) or Hibernate event listeners for audit logging and entity lifecycle behavior.
 
+## Transaction Synchronization Internals
+
+A `PlatformTransactionManager` (`JpaTransactionManager`) starts a transaction and binds the `EntityManager`/`Connection` to the thread through `TransactionSynchronizationManager`. Code (and Spring itself) can register `TransactionSynchronization` callbacks — `beforeCommit`, `afterCommit`, `afterCompletion` — which is exactly how `@TransactionalEventListener` and cache/messaging integrations hook the commit. `NESTED` propagation uses JDBC **savepoints**.
+
+## Isolation Levels and Anomalies
+
+| Isolation | Dirty read | Non-repeatable read | Phantom |
+| --- | --- | --- | --- |
+| READ_UNCOMMITTED | possible | possible | possible |
+| READ_COMMITTED | prevented | possible | possible |
+| REPEATABLE_READ | prevented | prevented | possible* |
+| SERIALIZABLE | prevented | prevented | prevented |
+
+Defaults differ by database (PostgreSQL `READ_COMMITTED`, MySQL/InnoDB `REPEATABLE_READ`); *InnoDB's next-key locks block many phantoms under RR.
+
+## Connection Pool (HikariCP) Tuning
+
+Key settings: `maximumPoolSize` (throughput is bounded by the DB, so a **small** pool often beats a large one), `minimumIdle`, `connectionTimeout`, `maxLifetime` (keep below the DB/infra idle cutoff), and `leakDetectionThreshold`. Oversized pools cause context-switching and DB contention — size to the database's real concurrency, not the app's request rate.
+
+## Batch Inserts and Identity
+
+Enable batching with `hibernate.jdbc.batch_size`, `order_inserts`, and `order_updates`. Critically, `GenerationType.IDENTITY` **disables** insert batching (Hibernate needs the generated key per row); use `SEQUENCE` with a pooled optimizer instead. For PostgreSQL, `reWriteBatchedInserts=true` collapses batches into multi-row inserts.
+
+## Second-Level Cache Strategies
+
+The L2 cache is shared across sessions: set `shared-cache-mode`, annotate cacheable entities, and pick a provider (JCache/Ehcache/Infinispan) with a strategy — `READ_ONLY` (immutable reference data), `NONSTRICT_READ_WRITE`, `READ_WRITE` (soft locks), or `TRANSACTIONAL`. Use it for rarely-changing, frequently-read data; avoid it for hot, write-heavy entities, and be wary of the query cache.
+
+## Mapping Strategies
+
+Model value objects with `@Embeddable`/`@Embedded`, convert custom types with `AttributeConverter`, and choose an inheritance strategy deliberately: `SINGLE_TABLE` (fast, nullable columns), `JOINED` (normalized, extra joins), or `TABLE_PER_CLASS` (rarely ideal). Composite keys use `@EmbeddedId`/`@IdClass`; share a primary key with `@MapsId`.
+
+## Multiple DataSources and Read Replicas
+
+Define separate `DataSource`/`EntityManagerFactory`/`TransactionManager` beans (one `@Primary`). For read/write splitting, an `AbstractRoutingDataSource` selects a replica based on a `ThreadLocal` set from `@Transactional(readOnly = true)`, and `LazyConnectionDataSourceProxy` defers acquiring the connection until the first statement so the routing decision is correct.
+
+## Schema Migrations
+
+Manage schema with **Flyway** (`V1__init.sql`, repeatable `R__view.sql`) or **Liquibase** changelogs, applied automatically on startup. In production use `spring.jpa.hibernate.ddl-auto=validate` (never `update`) and let the migration tool own DDL.
+
 ## Interview Q&A
 
 **Q: What is the persistence context and how does it relate to the first-level cache?**
@@ -169,6 +208,21 @@ A: Not immediately — it queues changes and flushes at the flush point (before 
 
 **Q: Why does Spring translate persistence exceptions, and how?**
 A: To decouple callers from provider-specific exceptions. `PersistenceExceptionTranslationPostProcessor` (active on `@Repository` beans) converts them into Spring's consistent, unchecked `DataAccessException` hierarchy.
+
+**Q: How do you enable JDBC batch inserts and why do they help?**
+A: Set `spring.jpa.properties.hibernate.jdbc.batch_size` (plus `order_inserts`/`order_updates`); Hibernate then sends inserts/updates as batched `PreparedStatement`s, cutting round-trips dramatically.
+
+**Q: Why does `GenerationType.IDENTITY` hurt batching?**
+A: With IDENTITY, Hibernate needs the database-generated key immediately after each insert, so it cannot batch them. Use a `SEQUENCE` with a pooled optimizer to keep batching.
+
+**Q: When should you use the second-level cache?**
+A: For small, read-mostly, rarely-changing reference data with an appropriate strategy (`READ_ONLY`/`READ_WRITE`). Avoid it for hot, write-heavy entities, and be cautious with the query cache.
+
+**Q: How do you route reads to a replica?**
+A: Use an `AbstractRoutingDataSource` keyed off a `ThreadLocal` set from `@Transactional(readOnly = true)`, with `LazyConnectionDataSourceProxy` so the connection (and routing) is chosen at the first statement.
+
+**Q: What are the trade-offs of `SINGLE_TABLE` vs `JOINED` inheritance?**
+A: `SINGLE_TABLE` is fast (no joins) but needs nullable columns and loses some constraints; `JOINED` is normalized and constraint-friendly but adds a join per query. `TABLE_PER_CLASS` is rarely ideal.
 
 ## Interview Notes
 

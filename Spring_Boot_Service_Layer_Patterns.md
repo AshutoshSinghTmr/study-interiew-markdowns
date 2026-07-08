@@ -133,6 +133,55 @@ Spring Boot integrates with Resilience4j and Spring Retry to add circuit breaker
 * verify transactional behavior with real persistence contexts
 * use `@DataJpaTest` for repository-focused persistence tests
 
+## Propagation Matrix
+
+| Propagation | If a transaction exists | If none exists |
+| --- | --- | --- |
+| `REQUIRED` (default) | join it | start a new one |
+| `REQUIRES_NEW` | suspend it, start a new one | start a new one |
+| `NESTED` | run in a savepoint | start a new one |
+| `SUPPORTS` | join it | run non-transactionally |
+| `NOT_SUPPORTED` | suspend it, run non-transactionally | run non-transactionally |
+| `MANDATORY` | join it | throw |
+| `NEVER` | throw | run non-transactionally |
+
+## Programmatic Transactions
+
+When declarative boundaries are too coarse, use `TransactionTemplate` (or `PlatformTransactionManager` directly) to scope exactly the critical section:
+
+```java
+transactionTemplate.executeWithoutResult(status -> {
+    repo.save(order);
+    if (invalid) status.setRollbackOnly();
+});
+```
+
+The reactive equivalent is `TransactionalOperator`.
+
+## Transaction-bound Events
+
+`@TransactionalEventListener` defers handling to a transaction phase — `AFTER_COMMIT` (default), `BEFORE_COMMIT`, `AFTER_ROLLBACK`, or `AFTER_COMPLETION`. This is the clean way to fire side effects (emails, messages, cache updates) only when the business transaction actually commits, avoiding phantom effects on rollback. Set `fallbackExecution=true` to still run without a transaction.
+
+## Domain Events and Aggregates
+
+Extend `AbstractAggregateRoot` and call `registerEvent(...)`; Spring Data publishes the collected `@DomainEvents` when the aggregate is saved. In DDD the aggregate boundary is the consistency (transaction) boundary — modify one aggregate per transaction and coordinate across aggregates with events.
+
+## Idempotency and Retry
+
+For at-least-once flows, make handlers idempotent (dedupe on a business key or an idempotency table). Use `@Retryable` + `@Recover` for transient failures, and place retry **outside** the transaction so each attempt gets a fresh one. Prefer exponential backoff with jitter.
+
+## Orchestration vs Choreography
+
+Orchestration uses a central coordinator that issues commands step by step (explicit, easy to trace, single point of change); choreography lets services react to each other's events (decoupled, resilient, but harder to follow). Long-running cross-service consistency is handled by the **saga** pattern (see Microservices).
+
+## Anti-corruption Layer and Hexagonal Architecture
+
+Keep the domain pure by defining **ports** (interfaces) and **adapters** (implementations) at the edges, with an **anti-corruption layer** translating external models into your domain language. DTO<->domain mapping happens at the boundary, so third-party or legacy shapes never leak into core logic.
+
+## Read-only and Bulk Work
+
+`@Transactional(readOnly = true)` hints Hibernate to skip dirty checking (flush mode `MANUAL`) and lets drivers/replicas optimize. For large exports, stream results rather than materializing huge object graphs, and prefer set-based bulk updates over per-entity loops.
+
 ## Interview Q&A
 
 **Q: How does `@Transactional` actually work under the hood?**
@@ -152,6 +201,21 @@ A: Transaction Script puts procedural logic in service methods (simple, but can 
 
 **Q: Why does advice ordering matter for `@Retryable` and `@Transactional`?**
 A: If retry sits inside the transaction, a retry reuses a transaction that may already be rollback-only. Put retry *outside* (higher precedence) so each attempt gets a fresh transaction.
+
+**Q: What is `NESTED` propagation and how is it implemented?**
+A: It runs within the current transaction but at a JDBC **savepoint**, so the inner work can roll back to the savepoint without aborting the outer transaction. It requires a resource that supports savepoints.
+
+**Q: Why publish side effects with `@TransactionalEventListener(AFTER_COMMIT)`?**
+A: So the effect (email, message, cache update) fires only if the business transaction actually commits, preventing phantom actions when it rolls back.
+
+**Q: What does `@Transactional(readOnly = true)` actually do?**
+A: It hints Hibernate to use flush mode `MANUAL` (skipping dirty checking) and lets the driver/replica optimize — a performance hint, not a hard guarantee against writes.
+
+**Q: How do you make a message handler idempotent?**
+A: Dedupe on a business/message key (a unique constraint or an idempotency table) or use upserts, so reprocessing the same message under at-least-once delivery has no extra effect.
+
+**Q: What is the difference between `MANDATORY` and `NEVER` propagation?**
+A: `MANDATORY` requires an existing transaction and throws if none exists; `NEVER` requires that none exists and throws if one is active.
 
 ## Interview Notes
 

@@ -106,6 +106,49 @@ Because advice runs on the proxy, an internal call (`this.method()`) bypasses it
 * **Spring AOP**: proxy-based, method-execution join points only, Spring beans only. Simple, no special build steps — covers most needs.
 * **AspectJ weaving** (compile-time or load-time): weaves bytecode, supports field access, constructors, non-Spring objects, and `this`-calls. Needed for finer-grained or non-proxyable concerns, at the cost of build/agent setup.
 
+## How Spring Creates the Proxy
+
+`AnnotationAwareAspectJAutoProxyCreator` — a `BeanPostProcessor` — inspects every bean during initialization for matching **`Advisor`s** (an `Advisor` = `Pointcut` + `Advice`; each `@Aspect` advice method becomes an advisor). If at least one advisor matches, the bean is wrapped in a proxy in `postProcessAfterInitialization`. A JDK dynamic proxy is used when the target implements an interface; otherwise a CGLIB subclass is generated (or always, with `proxyTargetClass=true`). `final` classes/methods and `private` methods cannot be proxied.
+
+## Pointcut Expression Language
+
+AspectJ designators supported by Spring AOP:
+
+* `execution(...)` — the main one: method execution matching a signature.
+* `within(type)` / `@within(annotation)` — join points inside a type / a type bearing an annotation.
+* `@annotation(A)` — methods annotated with `A`.
+* `target(T)` / `this(T)` — the target/proxy is an instance of `T`.
+* `args(...)` / `@args(...)` — argument types / argument annotations.
+* `bean(name)` — Spring-specific, by bean name.
+
+An `execution` pattern reads `modifiers? ret-type declaring-type?.method(params) throws?`, e.g. `execution(public * com.acme..*Service.*(..))`.
+
+## The Invocation Chain
+
+At call time Spring builds a `ReflectiveMethodInvocation` — a chain of `MethodInterceptor`s (each advice adapted to an interceptor). Calling `proceed()` advances the chain until the target runs, then unwinds. `@Around` maps directly to a `MethodInterceptor`; the annotation advices are adapted onto the same chain.
+
+## Advice Precedence
+
+For a single join point advised by multiple aspects, precedence follows `@Order`/`Ordered` (lower = outer). Within one aspect the order is deterministic: the `@Around`/`@Before` of a higher-precedence aspect wrap those of a lower one, and on the way out its `@AfterReturning`/`@After` run last. This is why retry (outer) should wrap a transaction (inner).
+
+## Introductions
+
+`@DeclareParents` (introductions) add a new interface and a default implementation to targets — a mixin — letting you attach state or behavior (e.g. an `Auditable` capability) without editing the target classes.
+
+## Weaving Modes
+
+| Mode | When woven | Can advise |
+| --- | --- | --- |
+| Spring AOP | Runtime (proxy) | `public` method executions on Spring beans |
+| AspectJ CTW | Compile time (`ajc`) | Fields, constructors, any object |
+| AspectJ LTW | Class load (`-javaagent`) | Same as CTW, no build change |
+
+Enable load-time weaving with `@EnableLoadTimeWeaving` or a Java agent. LTW/CTW also fix **self-invocation**, because advice is woven into the bytecode instead of applied by a proxy.
+
+## Performance and Pitfalls
+
+Per-call proxy overhead is small, but deep advisor chains on hot paths add up — avoid advising tight inner-loop methods. Recap of proxy limits: self-invocation bypasses advice (use `AopContext.currentProxy()` with `exposeProxy=true`, self-injection, or LTW); only `public` method executions are advised; `final`/`private`/static methods are not. When combining `@Transactional`, `@Cacheable`, and `@Retryable`, set explicit `@Order` so the semantics (retry -> transaction -> cache) are correct.
+
 ## Interview Q&A
 
 **Q: Is Spring AOP the same as AspectJ?**
@@ -125,6 +168,21 @@ A: With `@Order`/`Ordered` on the aspects — lower values wrap the outer layers
 
 **Q: What kinds of join points can Spring AOP advise?**
 A: Only method executions on Spring-managed beans. Constructors, static methods, final methods, and field access are not advisable with proxy-based AOP.
+
+**Q: What is an `Advisor` and how does it relate to pointcut and advice?**
+A: An `Advisor` pairs a `Pointcut` (where) with an `Advice` (what). The auto-proxy creator collects matching advisors for each bean and wraps it in a proxy.
+
+**Q: How is the advice chain executed at call time?**
+A: Spring builds a `ReflectiveMethodInvocation` — a chain of `MethodInterceptor`s. Each `proceed()` advances to the next interceptor until the target runs, then the stack unwinds.
+
+**Q: What is an introduction?**
+A: `@DeclareParents` adds a new interface and a default implementation (a mixin) to targets, attaching behavior or state without modifying the classes.
+
+**Q: When do you need AspectJ weaving instead of Spring AOP?**
+A: When you must advise fields, constructors, `final`/`private` methods, non-Spring objects, or self-invoked calls — use compile-time or load-time weaving (`@EnableLoadTimeWeaving`).
+
+**Q: How do you invoke an advised method on the same bean and still get the advice?**
+A: Call through the proxy: enable `exposeProxy=true` and use `((MyType) AopContext.currentProxy()).method()`, self-inject the bean, or switch to AspectJ weaving.
 
 ## Interview Notes
 

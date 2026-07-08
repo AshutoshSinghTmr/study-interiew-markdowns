@@ -128,6 +128,55 @@ Implement `Converter` or `PropertyEditorRegistrar` for custom types. Immutable c
 
 Create an `EnvironmentPostProcessor` to register custom property sources before the application context refreshes.
 
+## Config Data API Internals
+
+Since Boot 2.4, external configuration is loaded by the **Config Data API**, replacing the old `bootstrap`/`ConfigFileApplicationListener` mechanism. Two SPIs drive it:
+
+* `ConfigDataLocationResolver` — turns a location string (`optional:file:./config/`, `configserver:`, `vault:`) into concrete resources.
+* `ConfigDataLoader` — loads each resolved resource into `ConfigData` (property sources).
+
+`spring.config.import` composes locations declaratively, and imports are resolved in document order with later imports overriding earlier ones. Prefix a location with `optional:` so a missing source does not fail startup. This model makes Kubernetes ConfigMaps, Vault, and Config Server first-class without a separate bootstrap context.
+
+## Property Source Ordering — the Complete Picture
+
+Each source is a `PropertySource` inside the ordered `MutablePropertySources`; the first source that contains a key wins. Every resolved value also carries an **`Origin`**, so Actuator's `env` endpoint and error messages can point at the exact file and line a value came from. A subtle gotcha: `@PropertySource` does **not** load YAML (it is properties-only) — use `spring.config.import` or a custom `PropertySourceFactory` for YAML.
+
+## Relaxed Binding and the Binder API
+
+Relaxed binding is implemented by the programmatic `Binder`, which normalizes names to a canonical, lower-kebab form before matching. This is why environment variables work: `SPRING_DATASOURCE_URL` maps to `spring.datasource.url`. Binding also supports structured types:
+
+```yaml
+app:
+  servers:
+    - host: a.example.com   # list -> List<Server>
+      port: 8080
+  limits:
+    orders: 100             # map -> Map<String,Integer>
+```
+
+For environment variables, list indices use `APP_SERVERS_0_HOST` and map keys use `APP_LIMITS_ORDERS`. You can drive binding manually with `Binder.get(environment).bind("app", Bindable.of(AppProps.class))` and intercept it with a `BindHandler` (for defaulting, validation, or auditing).
+
+## Validation and Metadata
+
+Annotate a `@ConfigurationProperties` type with `@Validated` to enforce JSR-380 constraints (`@NotNull`, `@Min`, nested `@Valid`) at startup, so misconfiguration fails fast rather than at first use. Add the `spring-boot-configuration-processor` dependency to generate `META-INF/spring-configuration-metadata.json`, which powers IDE auto-completion and documentation for your keys; supplement it with `additional-spring-configuration-metadata.json` for hints and deprecations.
+
+## Profiles Deep Dive
+
+* **Activation**: `spring.profiles.active`, `SPRING_PROFILES_ACTIVE`, `--spring.profiles.active`, or `@ActiveProfiles` in tests. `spring.profiles.default` (default `default`) applies when none are active.
+* **Groups**: `spring.profiles.group.prod=metrics,db-prod` activates several profiles from one name.
+* **Expressions**: `@Profile("prod & !legacy")` supports `&`, `|`, `!` for conditional beans.
+* **Config activation**: within a file, `spring.config.activate.on-profile` gates a document, replacing the older `spring.profiles` document key.
+
+Profile-specific files (`application-prod.yml`) always override the base `application.yml` when active, regardless of import order.
+
+## Secrets Management
+
+Keep secrets out of images and source control. Practical patterns: mount Kubernetes Secrets as env vars or files and import with `spring.config.import=optional:file:/etc/secrets/`; use `spring.config.import=vault://` with Spring Cloud Vault; or use Config Server encrypted `{cipher}` values. Mask them in Actuator with `management.endpoint.env.keys-to-sanitize` and never log the `Environment`.
+
+## Runtime Refresh
+
+With Spring Cloud, beans annotated `@RefreshScope` are re-created on a `POST /actuator/refresh` (or a bus-wide `/actuator/busrefresh`). `ContextRefresher` rebuilds the `Environment`, publishes `EnvironmentChangeEvent`, and re-binds affected `@ConfigurationProperties`, so a config change can take effect without a redeploy — useful for feature flags, log levels, and connection tuning.
+
 ## Interview Q&A
 
 **Q: When should you use `@ConfigurationProperties` instead of `@Value`?**
@@ -147,6 +196,21 @@ A: Register an `EnvironmentPostProcessor` (declared in `AutoConfiguration.import
 
 **Q: How do you keep secrets out of the codebase?**
 A: Source them from environment variables, a secret manager, or Vault through `spring.config.import`; never commit them, and keep them out of logs and the Actuator `env`/`info` endpoints (mask with `management.endpoint.env.keys-to-sanitize`).
+
+**Q: What is the precedence among command-line args, environment variables, and `application.yml`?**
+A: Higher wins: command-line args > `SPRING_APPLICATION_JSON` > OS environment variables / system properties > profile-specific files > `application.yml` > defaults.
+
+**Q: How does `@ConfigurationProperties` validation work?**
+A: Add `@Validated` with JSR-380 constraints (`@NotNull`, `@Min`, nested `@Valid`); binding runs at startup and a violation throws, so bad config fails fast rather than at first use.
+
+**Q: How do you bind a list or map from environment variables?**
+A: Use indexed/keyed names: `APP_SERVERS_0_HOST` for `app.servers[0].host` and `APP_LIMITS_ORDERS` for `app.limits.orders`. Relaxed binding maps the upper-snake form to the canonical property.
+
+**Q: What is the difference between `spring.config.import` and `@PropertySource`?**
+A: `spring.config.import` is part of the Config Data API — it supports YAML, profiles, and `optional:`/`configserver:`/`vault:` locations; `@PropertySource` is an older annotation that only loads `.properties` (not YAML) without those features.
+
+**Q: How do profile groups help?**
+A: `spring.profiles.group.prod=db-prod,metrics` activates several profiles from one name, so setting `prod` pulls in the whole set — cleaner than repeating them everywhere.
 
 ## Interview Notes
 

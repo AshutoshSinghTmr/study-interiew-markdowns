@@ -134,6 +134,49 @@ Use `--debug` to print auto-configuration decisions. `spring.main.lazy-initializ
 
 Use heap dumps and thread dumps to diagnose leaks and deadlocks. Tools like VisualVM, Java Flight Recorder, and `jcmd` are valuable.
 
+## Actuator Internals and Custom Endpoints
+
+Actuator endpoints are beans annotated `@Endpoint` with `@ReadOperation`/`@WriteOperation`/`@DeleteOperation` methods, exposed over web (`@WebEndpoint`) and/or JMX. Health aggregates `HealthContributor`s from a registry; `info` aggregates `InfoContributor`s. Secure them with a dedicated `SecurityFilterChain` over `EndpointRequest.toAnyEndpoint()` and optionally isolate them on `management.server.port`.
+
+```java
+@Component
+@Endpoint(id = "features")
+public class FeatureEndpoint {
+    @ReadOperation
+    public Map<String, Boolean> features() { return flags.snapshot(); }
+}
+```
+
+## Micrometer Architecture
+
+Micrometer is a facade: your code records to a `MeterRegistry`, and a backend implementation (Prometheus, OTLP, Datadog) publishes. Meters are named in dotted form and carry **tags/dimensions** — keep tag cardinality low (never a user id or unbounded value) to avoid metric explosions. Distinguish `Timer` (short calls) from `LongTaskTimer` (in-flight long tasks), and decide between client-side percentiles and server-side histograms (`histogram_quantile` in Prometheus).
+
+## The Observation API
+
+An `Observation` models one instrumented operation and emits metrics **and** a trace span from a single instrumentation point. Register `ObservationHandler`s, annotate with `@Observed`, or wrap code with `Observation.createNotStarted(...)`. This unifies what previously required separate `@Timed` and tracing code.
+
+## Distributed Tracing Concepts
+
+A **span** has a start/stop, tags, and events; spans form a **trace** via parent/child links. **Baggage** propagates correlated values across services; **sampling** (head-based probabilistic or tail-based) bounds overhead. Spans export to Zipkin or an OTLP collector.
+
+## Metrics Methodologies
+
+* **RED** (Rate, Errors, Duration) — for request-driven services.
+* **USE** (Utilization, Saturation, Errors) — for resources (CPU, pools, queues).
+* **SLI/SLO/error budgets** — quantify reliability targets and guide alerting on symptoms, not causes.
+
+## Logging and Correlation
+
+Use structured JSON logging (Logstash encoder, or Boot 3.4's built-in structured logging) and put `traceId`/`spanId` in the MDC so logs correlate with traces. The Actuator `loggers` endpoint changes log levels at runtime without a redeploy.
+
+## JVM and GC Tuning
+
+Size the heap for the container (`-XX:MaxRAMPercentage`), keep container awareness on, and pick a collector: **G1** (balanced default), **ZGC** (low pause, large heaps), or Parallel (throughput). Enable GC logging and watch `jvm.gc.*`, `jvm.memory.*`, and pool metrics.
+
+## Profiling and Diagnostics
+
+**Java Flight Recorder** gives continuous low-overhead profiling; **async-profiler** produces accurate flamegraphs without safepoint bias. Capture heap dumps for leaks (analyze in Eclipse MAT) and thread dumps for deadlocks (`jcmd`, Actuator `threaddump`/`heapdump`).
+
 ## Interview Q&A
 
 **Q: How do you expose and secure Actuator endpoints in production?**
@@ -153,6 +196,21 @@ A: For startup, use `--debug` / `BufferingApplicationStartup` and consider lazy 
 
 **Q: Why can `spring.main.lazy-initialization=true` be risky?**
 A: It speeds startup by deferring bean creation, but wiring/configuration errors then surface on first use at runtime rather than at boot.
+
+**Q: Why must metric tag cardinality stay low?**
+A: Each unique tag combination is a separate time series; high-cardinality tags (user id, request id) explode memory and storage and can overwhelm the metrics backend.
+
+**Q: What is the Observation API and how does it relate to metrics and tracing?**
+A: A single `Observation` around an operation emits both a metric (timer/counter) and a trace span from one instrumentation point, replacing separate `@Timed` and tracing code.
+
+**Q: What are the RED and USE methods?**
+A: RED (Rate, Errors, Duration) describes request-driven services; USE (Utilization, Saturation, Errors) describes resources like CPU, pools, and queues. Both guide dashboards and alerts.
+
+**Q: How do you correlate application logs with traces?**
+A: Put `traceId`/`spanId` in the MDC (Micrometer Tracing does this) and log structured JSON, so a log line links directly to its trace in the backend.
+
+**Q: How do you change log levels without a redeploy?**
+A: `POST` to the Actuator `loggers` endpoint (e.g. `/actuator/loggers/com.acme`) to set a level at runtime.
 
 ## Interview Notes
 

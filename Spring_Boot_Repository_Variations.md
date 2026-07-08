@@ -149,6 +149,52 @@ Use `repositoryBaseClass` in `@EnableJpaRepositories` to supply a custom base im
 | Custom fragment | Complex custom behavior with Spring Data wiring |
 | Pure repository bean | Legacy SQL or non-standard persistence |
 
+## The Repository Proxy Pipeline
+
+Boot auto-enables `@EnableJpaRepositories`, which registers a `JpaRepositoryFactoryBean` for each interface. At creation, `RepositoryFactorySupport` builds a **JDK dynamic proxy** whose `QueryExecutorMethodInterceptor` routes each call to a **fragment** implementation, the declared `@Query`, a **derived** query, or the shared base (`SimpleJpaRepository`). `RepositoryComposition` combines fragments and base class. Queries are resolved and **validated at bootstrap** (fail-fast), so a bad `@Query` fails startup rather than at first call.
+
+## Derived Query Grammar
+
+A method name parses into a *subject* (`find`/`read`/`get`/`query`/`count`/`exists`/`delete`) + `By` + a predicate built from keywords: `And`, `Or`, `Between`, `LessThan`, `Like`, `StartingWith`, `In`, `IgnoreCase`, `OrderBy...Desc`, `True`. Limit results with `findFirst10By...`/`findTop...`, dedupe with `Distinct`, and traverse nested properties (`findByCustomerAddressCity`), disambiguating with an underscore (`findByCustomer_Id`) when needed.
+
+## Projections and Dynamic Results
+
+* **Closed interface projection** — getters only; the provider can push it into the SQL `SELECT` (no full entity load).
+* **Open projection** — `@Value("#{...}")` SpEL; forces loading the whole entity.
+* **Class/DTO projection** — constructor binding into a record or POJO.
+* **Dynamic projection** — `<T> List<T> findByStatus(Status s, Class<T> type)` chooses the shape at call time.
+
+## Specifications and Criteria
+
+`JpaSpecificationExecutor` composes type-safe `Specification<T>` predicates, ideal for optional filters:
+
+```java
+Specification<Order> spec = Specification
+    .where(hasStatus(status))
+    .and(placedAfter(date));
+Page<Order> page = repo.findAll(spec, pageable);
+```
+
+Use the JPA metamodel (`Order_.status`) for compile-time safety.
+
+## Auditing
+
+`@EnableJpaAuditing` plus `@CreatedDate`/`@LastModifiedDate`/`@CreatedBy`/`@LastModifiedBy` (with an `AuditorAware<T>` bean) populates audit columns automatically on persist and update.
+
+## Pagination and Streaming
+
+* **`Page`** issues a second `count` query; **`Slice`** only knows `hasNext` (cheaper); a plain `List` returns everything.
+* For deep pages, prefer **keyset/seek** pagination (`WHERE id > :last ORDER BY id`) over large offsets.
+* Stream large result sets with `Stream<T>` + `@QueryHints`, or use `ScrollPosition`/`Window` (Spring Data 3.1) for keyset scrolling.
+
+## Modifying, Locking, and Batch
+
+`@Modifying(clearAutomatically = true, flushAutomatically = true)` on bulk update/delete keeps the persistence context consistent. `@Lock(PESSIMISTIC_WRITE)` and `@QueryHints` control locking and fetch behavior. Note that `saveAll` is not automatically batched — see the batching notes in the Data Access guide.
+
+## Spring Data 3.x Interface Graph
+
+Spring Data Commons 3.0 **decoupled** `PagingAndSortingRepository` from `CrudRepository` and added `ListCrudRepository`/`ListPagingAndSortingRepository` (List-returning). In current versions `JpaRepository` extends the `List*` variants plus `QueryByExampleExecutor`, so you get CRUD, paging, and QBE together.
+
 ## Interview Q&A
 
 **Q: How does Spring Data turn a repository interface into a working bean?**
@@ -168,6 +214,21 @@ A: Extend `JpaSpecificationExecutor` and compose `Specification<T>` objects (Cri
 
 **Q: Why prefer projections/DTOs over returning entities?**
 A: They fetch only the needed columns, reduce payload, and avoid lazy-loading and entity-exposure pitfalls; interface projections can even be pushed into the SQL select list by the provider.
+
+**Q: What is the cost difference between `Page` and `Slice`?**
+A: `Page` runs an extra `count` query to compute total pages; `Slice` only fetches `pageSize + 1` rows to know whether a next page exists. Use `Slice` (or a `List`) when you do not need the total.
+
+**Q: How do you avoid slow deep-offset pagination?**
+A: Use keyset/seek pagination (`WHERE id > :lastSeen ORDER BY id LIMIT n`) instead of a large `OFFSET`, or `ScrollPosition`/`Window` (Spring Data 3.1) which does keyset scrolling.
+
+**Q: What does `@Modifying` do and what are its caveats?**
+A: It marks an `@Query` as an update/delete so Spring runs it as bulk DML. It bypasses the persistence context, so set `clearAutomatically`/`flushAutomatically` to avoid stale managed entities.
+
+**Q: When do you choose an interface projection versus a class (DTO) projection?**
+A: Closed interface projections let the provider select only the needed columns (no entity load); class/record DTOs use a constructor and are handy for computed values or passing across layers.
+
+**Q: How does JPA auditing populate created/modified fields?**
+A: `@EnableJpaAuditing` plus `@CreatedDate`/`@LastModifiedDate`/`@CreatedBy`/`@LastModifiedBy` (backed by an `AuditorAware` bean) fills them automatically on persist/update via an entity listener.
 
 ## Interview Notes
 

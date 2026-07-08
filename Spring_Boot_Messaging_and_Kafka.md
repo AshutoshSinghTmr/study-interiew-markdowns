@@ -89,6 +89,38 @@ To publish an event atomically with a database change, write the event to an **o
 
 Spring Cloud Stream adds a binder abstraction over Kafka/RabbitMQ using functional `Supplier`/`Function`/`Consumer` beans, so the same code targets different brokers by swapping the binder — useful for portable event-driven microservices.
 
+## Producer Internals
+
+`KafkaTemplate` wraps a `KafkaProducer`. Durability and throughput are tuned with: `acks` (`0`/`1`/`all`), `retries` + `delivery.timeout.ms`, and `enable.idempotence=true` (dedupes retries and preserves per-partition order when `max.in.flight.requests<=5`). `linger.ms` + `batch.size` trade a little latency for much higher throughput; `compression.type` reduces bandwidth. The default **sticky partitioner** batches to one partition until it fills; a record **key** routes by hash to keep same-key messages ordered.
+
+## Consumer Internals
+
+Consumers run a **poll loop**. `max.poll.records` bounds each batch, and processing must finish within `max.poll.interval.ms` or the broker considers the consumer dead and triggers a rebalance. Heartbeats (`session.timeout.ms`) run separately from polling. Prefer the **cooperative-sticky** rebalance protocol (incremental) over the old eager (stop-the-world) one; use `group.instance.id` for **static membership** to avoid rebalances on rolling restarts.
+
+## Offset Management
+
+Offsets track progress per partition. Avoid `enable.auto.commit` for reliability; instead let the container commit via an `AckMode` (`RECORD`, `BATCH`, `MANUAL`, `MANUAL_IMMEDIATE`). Committing **after** processing gives at-least-once (possible duplicates); committing before gives at-most-once (possible loss). At-least-once plus idempotent consumers is the common, robust choice.
+
+## Error Handling and Retries
+
+The container's `DefaultErrorHandler` retries with a `FixedBackOff`/`ExponentialBackOff`, then hands failures to a `DeadLetterPublishingRecoverer` (-> `<topic>.DLT`). Prefer **non-blocking** retries via `@RetryableTopic` (separate retry topics + DLT), because in-line blocking retries stall the whole partition.
+
+## Exactly-Once Semantics
+
+Kafka transactions (`transactional.id`, `KafkaTransactionManager`) plus `sendOffsetsToTransaction` make a **read-process-write** flow atomic; downstream consumers set `isolation.level=read_committed`. This yields exactly-once **within Kafka**; when a side effect touches an external system, keep the consumer idempotent or use the outbox pattern.
+
+## Serialization and Schema Evolution
+
+Configure key/value `Serializer`/`Deserializer`. Wrap deserializers in `ErrorHandlingDeserializer` so a single poison record does not crash the container. For `JsonDeserializer`, set trusted packages/type mappings. For evolving contracts, use **Avro/Protobuf with a Schema Registry** and a compatibility mode (backward/forward) so producers and consumers can deploy independently.
+
+## Concurrency and Containers
+
+`@KafkaListener(concurrency = "N")` runs N consumer threads in a `ConcurrentMessageListenerContainer`, effective up to the partition count. **Batch listeners** process a list per poll for higher throughput; containers support `pause()`/`resume()` for backpressure and flow control.
+
+## Kafka Streams, RabbitMQ, and the Outbox
+
+**Kafka Streams** (`KStream`/`KTable`) does stateful stream processing with its own exactly-once support. **RabbitMQ** routes producer -> exchange (direct/topic/fanout/headers) -> queue, with ack/nack/requeue, dead-letter exchanges, and consumer `prefetch` (QoS). The **transactional outbox** (often with CDC via Debezium) publishes events reliably by writing them in the same DB transaction as the state change.
+
 ## Interview Q&A
 
 **Q: How does Kafka scale consumers, and what limits parallelism?**
@@ -111,6 +143,21 @@ A: The dual-write problem — it makes the database change and the "event to pub
 
 **Q: When would you pick RabbitMQ over Kafka?**
 A: RabbitMQ suits per-message routing, work queues, and complex routing topologies with lower retention needs; Kafka suits high-throughput, replayable event streams with long retention and partition-based ordering.
+
+**Q: What does `acks=all` plus the idempotent producer guarantee?**
+A: `acks=all` waits for all in-sync replicas, avoiding data loss on broker failure; `enable.idempotence=true` prevents duplicate writes on producer retries and preserves per-partition order.
+
+**Q: What is a consumer rebalance and how do you minimize disruption?**
+A: When group membership or partitions change, partitions are reassigned. Use the cooperative-sticky assignor (incremental) and `group.instance.id` static membership so rolling restarts do not trigger full stop-the-world rebalances.
+
+**Q: How do you achieve exactly-once processing in Kafka?**
+A: Use Kafka transactions (`transactional.id`) with `sendOffsetsToTransaction` for a read-process-write flow, and set consumers to `isolation.level=read_committed`; keep external side effects idempotent.
+
+**Q: How do you handle deserialization errors without crashing the consumer?**
+A: Wrap the deserializer in `ErrorHandlingDeserializer` so a bad record becomes a handled failure (routed to retry/DLT) instead of an infinite poison-pill loop.
+
+**Q: What does a schema registry give you?**
+A: A central store of Avro/Protobuf schemas with compatibility rules (backward/forward) so producers and consumers can evolve message formats independently without breaking each other.
 
 ## Interview Notes
 

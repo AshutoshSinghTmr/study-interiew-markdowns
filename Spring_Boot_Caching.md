@@ -89,6 +89,35 @@ The core annotations do not express TTL; configure expiry on the provider (Caffe
 * **Stampede** — many concurrent misses recompute at once; use `sync = true` or a provider that coalesces loads.
 * **Distributed staleness** — with Redis, evictions must be coordinated; set sensible TTLs.
 
+## Cache Abstraction Internals
+
+`@EnableCaching` registers a `CacheInterceptor` (AOP advice) that reads operation metadata via `CacheOperationSource`, resolves the target cache through a `CacheResolver` -> `CacheManager` -> `Cache`, and computes the key with a `KeyGenerator` (`SimpleKeyGenerator` by default). With `sync = true` it uses the atomic `Cache.get(key, valueLoader)` so only one thread computes a missing entry per node.
+
+## Key Generation Deep Dive
+
+The default key is a `SimpleKey` built from **all** arguments — so argument `equals`/`hashCode` matter, and arrays make poor keys. Prefer explicit SpEL (`key = "#order.id"`, `key = "#root.methodName + #p0"`) or a custom `KeyGenerator`. Keys must be stable and collision-free across methods that share a cache name.
+
+## Provider Deep Dives
+
+* **Caffeine** (local) — configure via `spec`: `maximumSize`, `expireAfterWrite`, `expireAfterAccess`, `refreshAfterWrite`; enable `recordStats()` for hit/miss metrics.
+* **Redis** (distributed) — `RedisCacheConfiguration` sets per-cache TTL, key prefix, null handling, and serialization (JSON vs JDK). It survives restarts and is shared across instances, at the cost of network latency and serialization.
+
+## Caching Strategies
+
+Spring's annotations implement **cache-aside** by default (load on miss, then populate). Providers can offer **read-through/write-through** (the cache loads/writes the store) or **write-behind** (async flush). Choose **TTL-based** expiry for tolerable staleness or **event-based** eviction for correctness.
+
+## Consistency and Invalidation
+
+Evict on writes with `@CacheEvict` (single key, or `allEntries = true`; `beforeInvocation = true` to evict even on failure). In a cluster, coordinate invalidation with Redis keyspace events or a message bus, and use versioned keys or short TTLs to bound staleness.
+
+## Multi-Level Caching
+
+A near-cache pattern pairs a fast **L1** (Caffeine, per instance) with a shared **L2** (Redis). It cuts latency and Redis load but adds coherence challenges — L1 entries can be briefly stale, so keep L1 TTLs short and invalidate on writes.
+
+## Pitfalls and Observability
+
+Recurring traps: self-invocation bypasses caching; caching `null`/exceptions; **unbounded** caches causing `OutOfMemoryError`; key collisions; cache stampede (mitigate with `sync = true` and jittered TTLs); serialization drift on Redis after model changes; and caching mutable shared objects. Register caches with a `MeterRegistry` (and Caffeine `recordStats`) to expose `cache.gets`/`cache.puts` hit-ratio metrics.
+
 ## Interview Q&A
 
 **Q: What is the difference between `@Cacheable` and `@CachePut`?**
@@ -108,6 +137,21 @@ A: Use `sync = true` (single-flight per key on a node) and/or a provider that co
 
 **Q: Where do TTL and size limits come from?**
 A: From the provider configuration (Caffeine `spec`, `RedisCacheConfiguration`, Ehcache), not the Spring cache annotations, which only describe *when* to cache/evict.
+
+**Q: How does `@CacheEvict` keep the cache consistent on writes?**
+A: Annotate the update/delete method to remove the affected key (or `allEntries = true` to clear the cache); use `beforeInvocation = true` to evict even if the method throws.
+
+**Q: Caffeine or Redis — when do you pick each?**
+A: Caffeine for a fast in-process cache (single instance, no sharing); Redis for a distributed cache shared across instances and surviving restarts, at the cost of network latency and serialization.
+
+**Q: What is cache-aside versus read-through caching?**
+A: Cache-aside (Spring's default) means the app loads on a miss and populates the cache; read-through delegates the load to the cache/provider itself. Write-through/write-behind handle writes similarly.
+
+**Q: How do you avoid caching `null` or exceptions?**
+A: Use `unless = "#result == null"` (or provider-level null handling); exceptions are never cached, so a failed load simply does not populate the entry.
+
+**Q: How do you expose cache hit-ratio metrics?**
+A: Register caches with a `MeterRegistry` (and enable Caffeine `recordStats`) so Micrometer publishes `cache.gets{result=hit|miss}`, `cache.puts`, and size gauges.
 
 ## Interview Notes
 

@@ -235,6 +235,67 @@ Rules of thumb:
 * Use `@Profile` for environment-specific beans and `@Bean` methods for third-party types.
 * Use `@Lazy` for rarely used beans or to break a constructor cycle.
 
+## The Container: `BeanFactory` vs `ApplicationContext`
+
+`BeanFactory` is the base IoC container — a lazy bean registry. `ApplicationContext` extends it with event publication, message/i18n resolution, resource loading, and **eager pre-instantiation of singletons** at startup. The concrete workhorse is `DefaultListableBeanFactory`, which stores every `BeanDefinition` and resolves dependencies.
+
+`AbstractApplicationContext.refresh()` is the canonical startup template:
+
+1. `obtainFreshBeanFactory()` — load bean definitions.
+2. `prepareBeanFactory()` — register environment and `*Aware` processors.
+3. `invokeBeanFactoryPostProcessors()` — run `BeanFactoryPostProcessor`s (including `ConfigurationClassPostProcessor`, which parses `@Configuration`/`@Bean`).
+4. `registerBeanPostProcessors()` — register `BeanPostProcessor`s (e.g. `AutowiredAnnotationBeanPostProcessor`).
+5. `finishBeanFactoryInitialization()` — pre-instantiate non-lazy singletons.
+6. `finishRefresh()` — publish `ContextRefreshedEvent`, start `Lifecycle` beans.
+
+## Bean Creation Phases
+
+`doCreateBean` runs three phases per bean:
+
+1. **Instantiate** — pick a constructor (or factory method) and create the raw instance.
+2. **Populate** — inject dependencies; `resolveDependency` matches by type, then narrows by `@Qualifier`/name/`@Primary`.
+3. **Initialize** — `*Aware` callbacks -> `postProcessBeforeInitialization` -> `@PostConstruct`/`InitializingBean`/`init-method` -> `postProcessAfterInitialization` (where AOP proxies are usually created).
+
+## Circular Dependencies — the Three-Level Cache
+
+Spring resolves singleton cycles (setter/field only) with three maps:
+
+* `singletonObjects` — fully initialized beans.
+* `earlySingletonObjects` — early references exposed mid-creation.
+* `singletonFactories` — `ObjectFactory`s that produce an early (possibly proxied) reference via `getEarlyBeanReference`.
+
+When bean A needs B and B needs A, A's early factory is exposed before A is fully initialized, so B wires the early A and finishes, letting A complete. A **constructor** cycle cannot use this (the instance does not exist yet) and fails. Since Boot 2.6, circular references are **disallowed by default** (`spring.main.allow-circular-references=false`) — treat a cycle as a design smell.
+
+## `@Configuration`: Full vs Lite Mode
+
+* **Full** (`proxyBeanMethods = true`, default) — the class is CGLIB-enhanced, so calling one `@Bean` method from another returns the shared singleton.
+* **Lite** (`proxyBeanMethods = false`) — no proxy: faster startup and native-friendly, but an inter-bean method call creates a *new* instance. Inject the dependency as a method parameter instead of calling the method.
+
+## Advanced Injection Points
+
+```java
+// Optional / plural / lazy without null checks
+private final ObjectProvider<AuditSink> sinks;
+
+void record(Event e) {
+    sinks.ifAvailable(sink -> sink.write(e));
+    sinks.orderedStream().forEach(s -> s.write(e));
+}
+```
+
+* `ObjectProvider<T>` — optional (`getIfAvailable`), plural (`orderedStream`), lazy resolution.
+* `@Lookup` — method injection to obtain a fresh prototype from a singleton on each call.
+* `FactoryBean<T>` — encapsulates complex construction; inject `&name` to get the factory itself.
+* Generics are respected: `Converter<Order, Dto>` injects the correctly typed bean, and annotations can act as qualifiers.
+
+## Ordering and Priority
+
+`@Order`/`Ordered` sets order for collection injection and post-processor chains; `@Priority` additionally influences which single candidate wins autowiring when several match.
+
+## AOT and Native Constraints
+
+Boot 3 AOT pre-computes bean registrations, proxies, and reflection hints at build time. In native images you cannot register beans dynamically at runtime as freely as on the JVM; supply reflection/resource/proxy hints with a `RuntimeHintsRegistrar` (`@ImportRuntimeHints`) so the required metadata is available.
+
 ## Interview Q&A
 
 **Q: Why is constructor injection preferred over field injection?**
@@ -254,6 +315,21 @@ A: It injects a proxy and defers real bean creation until first use, lowering st
 
 **Q: Why must prototype-scoped beans be used carefully?**
 A: Spring does not manage their full lifecycle — `@PreDestroy` is never called — and injecting a prototype into a singleton yields a single instance unless you use a scoped proxy or `ObjectProvider`.
+
+**Q: What is the difference between `BeanFactory` and `ApplicationContext`?**
+A: `BeanFactory` is the base lazy container; `ApplicationContext` extends it with eager singleton instantiation, event publishing, i18n, and resource loading. Applications use `ApplicationContext`.
+
+**Q: What does `proxyBeanMethods = true` do on `@Configuration`?**
+A: It CGLIB-enhances the class so calling one `@Bean` method from another returns the shared singleton. `proxyBeanMethods = false` (lite) skips the proxy for faster, native-friendly startup, but inter-bean method calls create new instances — inject the dependency instead.
+
+**Q: How do you inject all implementations of an interface and control their order?**
+A: Inject `List<T>` (or `Map<String, T>` keyed by bean name) and order with `@Order`/`Ordered`. It is the idiomatic basis for strategy/plugin designs.
+
+**Q: When would you use `ObjectProvider` or `@Lookup`?**
+A: `ObjectProvider<T>` for optional (`getIfAvailable`), plural (`orderedStream`), or lazy resolution without null checks; `@Lookup` to obtain a fresh prototype from a singleton on each call.
+
+**Q: What is a `FactoryBean`?**
+A: A bean that produces another object via `getObject()`, used for complex construction. Injecting `name` gives the produced object; injecting `&name` gives the factory itself.
 
 ## Interview Notes
 

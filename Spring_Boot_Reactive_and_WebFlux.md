@@ -111,6 +111,50 @@ Reactive context propagation is handled by Reactor `Context`. Use `Context.of(..
 * `StepVerifier` for validating reactive sequences
 * `@WebFluxTest` for slice tests
 
+## Assembly Time vs Subscription Time
+
+Building a `Mono`/`Flux` pipeline (**assembly**) does no work; execution starts only on **subscribe** — "nothing happens until you subscribe." Most sources are **cold** (each subscriber triggers the work afresh); a **hot** publisher (e.g. `Sinks.many().multicast()`) emits regardless of subscribers. `Mono.defer`/`Flux.defer` postpone source creation to subscription time so per-request state is captured correctly.
+
+## Schedulers
+
+Reactor never implicitly changes threads; you choose one:
+
+* `Schedulers.parallel()` — fixed pool for CPU-bound work.
+* `Schedulers.boundedElastic()` — for wrapping unavoidable blocking I/O.
+* `Schedulers.single()` / `immediate()` — single-threaded / caller thread.
+
+`subscribeOn` sets the thread for the **source** (affects the whole upstream chain); `publishOn` switches threads for everything **downstream** of it.
+
+## Backpressure
+
+Backpressure flows through the `Subscription`: a subscriber calls `request(n)` and the source emits at most `n`. When a producer outpaces a consumer, choose a strategy: `onBackpressureBuffer` (queue, optionally bounded), `onBackpressureDrop`, `onBackpressureLatest`, or `onBackpressureError`. `Flux.create(sink, overflowStrategy)` sets it at the source.
+
+## Key Operators
+
+* `map` (sync 1:1) vs `flatMap` (async, interleaved, with a concurrency argument) vs `concatMap` (async, ordered) vs `flatMapSequential` (concurrent, ordered output).
+* `switchIfEmpty`/`defaultIfEmpty` for empty sources; `zip`/`merge`/`combineLatest` to combine streams.
+* `window`/`buffer` for batching; `timeout` and `retryWhen(Retry.backoff(...))` for resilience.
+
+## Error Handling
+
+Use `onErrorResume` (fallback publisher), `onErrorReturn` (fallback value), `onErrorMap` (translate), and `doOnError` (side effect). Avoid `onErrorContinue` unless you understand its operator-fusion caveats. Retries belong in `retryWhen` with exponential backoff and jitter.
+
+## Context Propagation
+
+Thread-locals do not survive operator hops, so request-scoped values (security, trace, tenant) live in the immutable Reactor `Context`: write with `contextWrite(...)` (propagates **bottom-up**), read with `Mono.deferContextual(...)`. Boot 3's Micrometer **context-propagation** library bridges thread-local libraries into the Reactor context automatically.
+
+## WebClient Configuration
+
+Tune the underlying Reactor Netty client: connection pool size, `responseTimeout`, connect/read/write timeouts, `exchangeStrategies` (codec max in-memory buffer), retry filters, and `ExchangeFilterFunction`s for auth and logging. Reuse a single configured `WebClient` per downstream service.
+
+## R2DBC and Reactive Transactions
+
+Reactive persistence uses non-blocking drivers via `ReactiveCrudRepository` or `R2dbcEntityTemplate`. Transactions use a `ReactiveTransactionManager` with `@Transactional` or a `TransactionalOperator` so the transaction context flows through the reactive chain.
+
+## Testing and Blocking Detection
+
+`StepVerifier` asserts the exact sequence of signals (`expectNext`, `expectError`, `verifyComplete`); `StepVerifier.withVirtualTime(...)` fast-forwards virtual clocks for delay/interval operators. Add **BlockHound** in tests to detect accidental blocking calls on non-blocking threads.
+
 ## Interview Q&A
 
 **Q: When should you choose WebFlux over Spring MVC?**
@@ -130,6 +174,21 @@ A: `map` transforms each element synchronously (1:1); `flatMap` maps each elemen
 
 **Q: How do you propagate security or trace context reactively?**
 A: Thread-locals don't survive operator hops, so values travel in the Reactor `Context` via `contextWrite(...)` and are read with `Mono.deferContextual(...)`; Micrometer context-propagation bridges thread-local libraries.
+
+**Q: What does "nothing happens until you subscribe" mean?**
+A: Assembling a `Mono`/`Flux` only builds a plan; no work runs until a subscriber connects. Returning a publisher from a controller lets the framework subscribe for you.
+
+**Q: What is the difference between `subscribeOn` and `publishOn`?**
+A: `subscribeOn` sets the thread the source runs on (affecting the whole upstream chain); `publishOn` switches threads for operators downstream of it.
+
+**Q: Which `Scheduler` do you use for blocking I/O versus CPU work?**
+A: `Schedulers.boundedElastic()` to isolate unavoidable blocking I/O; `Schedulers.parallel()` for CPU-bound work. Never block on the event-loop threads.
+
+**Q: How do `flatMap`, `concatMap`, and `flatMapSequential` differ?**
+A: All map to inner publishers asynchronously; `flatMap` interleaves results (unordered), `concatMap` runs them one at a time in order, and `flatMapSequential` runs concurrently but emits in source order.
+
+**Q: How do you retry a reactive call with backoff?**
+A: `retryWhen(Retry.backoff(maxAttempts, minBackoff))` with jitter, optionally filtered to transient errors; avoid a naive `retry()` that hammers a failing dependency.
 
 ## Interview Notes
 

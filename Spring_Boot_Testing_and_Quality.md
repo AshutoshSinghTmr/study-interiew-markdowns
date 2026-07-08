@@ -92,6 +92,52 @@ The Spring TestContext Framework caches application contexts keyed by configurat
 * keep tests isolated and avoid shared mutable state
 * prefer real scenarios over implementation-specific tests
 
+## Test Slice Catalog
+
+Each slice auto-configures only its layer, so contexts stay small and fast:
+
+| Slice | Loads |
+| --- | --- |
+| `@WebMvcTest` | MVC infrastructure + the controller under test (no services) |
+| `@DataJpaTest` | JPA, repositories, an embedded DB, transactional rollback |
+| `@WebFluxTest` | WebFlux handlers + `WebTestClient` |
+| `@JsonTest` | Jackson/serialization |
+| `@RestClientTest` | `RestClient`/`RestTemplate` + `MockRestServiceServer` |
+| `@DataR2dbcTest` / `@JdbcTest` | reactive / plain JDBC data layers |
+
+## Context Caching Deep Dive
+
+The TestContext framework caches the `ApplicationContext` keyed by its full configuration (config classes, locations, properties, profiles, initializers, and mock-bean definitions). Any difference creates a **new** context — expensive. Keep test configurations uniform, avoid gratuitous `@TestPropertySource`/`@MockitoBean` variety, and use `@DirtiesContext` only when a test truly corrupts shared state.
+
+## Mocking and Test Configuration
+
+`@MockitoBean`/`@MockitoSpyBean` (Boot 3.4) add or replace beans with mocks/spies. `@TestConfiguration` supplies test-only beans that scanning ignores unless imported. `@TestBean` (Boot 3.4) overrides a bean via a static factory method without Mockito.
+
+## Testcontainers Integration
+
+`@Testcontainers` + `@Container` run real dependencies. **`@ServiceConnection`** (Boot 3.1) auto-wires the container's connection details into the environment — no manual `@DynamicPropertySource`. Enable container **reuse** for speed, and use `@ServiceConnection` with Compose or at dev time via `spring-boot-docker-compose`/Devtools.
+
+```java
+@Testcontainers
+@SpringBootTest
+class OrderIT {
+    @Container @ServiceConnection
+    static PostgreSQLContainer<?> db = new PostgreSQLContainer<>("postgres:16");
+}
+```
+
+## Web Layer Testing
+
+`MockMvc` exercises the MVC stack without a running server (fast); `@SpringBootTest(webEnvironment = RANDOM_PORT)` with `TestRestTemplate`/`WebTestClient` (or RestAssured) hits a real port for true end-to-end checks. Boot 3.4 adds the AssertJ-style `MockMvcTester`.
+
+## Data and Transaction Testing
+
+`@DataJpaTest` wraps each test in a transaction and **rolls back** by default, keeping tests isolated. Seed data with `@Sql` or `TestEntityManager`, use `@Commit` when you need persistence, and remember Hibernate may not flush until a query runs — call `flush()` to assert constraint violations.
+
+## Contract and Reliability Testing
+
+Consumer-driven **contract tests** (Spring Cloud Contract or Pact) verify API compatibility in CI without full integration. Keep tests deterministic: inject a fixed `Clock`, replace `Thread.sleep` with **Awaitility**, and consider **mutation testing** (PIT) to measure whether assertions actually catch regressions.
+
 ## Interview Q&A
 
 **Q: When should you use `@SpringBootTest` versus a slice test?**
@@ -111,6 +157,21 @@ A: Use focused slices — `@WebMvcTest` with `spring-security-test` for auth, `@
 
 **Q: How do you test reactive code deterministically?**
 A: Use `StepVerifier` to assert the sequence of emitted signals on a `Mono`/`Flux`, and `WebTestClient` for end-to-end WebFlux endpoints.
+
+**Q: What is `@ServiceConnection` and what does it replace?**
+A: A Boot 3.1 annotation on a Testcontainers container that auto-wires its connection details into the environment, replacing manual `@DynamicPropertySource` wiring.
+
+**Q: What is the difference between `MockMvc` and a `RANDOM_PORT` test?**
+A: `MockMvc` drives the MVC stack in-process without a real server (fast); `@SpringBootTest(webEnvironment = RANDOM_PORT)` starts an embedded server and uses `TestRestTemplate`/`WebTestClient` for true end-to-end HTTP.
+
+**Q: How does `@DataJpaTest` keep tests isolated?**
+A: It configures an embedded/Testcontainers DB and wraps each test in a transaction that **rolls back** afterward, so tests do not leak data into one another.
+
+**Q: What is the difference between `@TestConfiguration` and `@Configuration`?**
+A: `@TestConfiguration` is not picked up by component scanning; it applies only when explicitly imported (or as a static nested class of the test), so it customizes beans just for that test.
+
+**Q: What is consumer-driven contract testing?**
+A: The consumer defines the expected request/response contract; tools like Spring Cloud Contract or Pact generate provider tests and consumer stubs from it, catching incompatibilities in CI without full integration.
 
 ## Interview Notes
 

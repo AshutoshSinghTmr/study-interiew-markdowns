@@ -96,6 +96,63 @@ Spring Boot merges property sources by precedence and activates profiles using `
 * Override auto-configuration explicitly with `spring.autoconfigure.exclude` when needed.
 * Use `--debug` to print auto-configuration decisions during startup.
 
+## The Run Sequence in Depth
+
+`SpringApplication.run()` drives a fixed sequence, and `SpringApplicationRunListeners` (default `EventPublishingRunListener`) broadcast each phase as an event. Knowing the order explains *where* to hook in:
+
+1. `ApplicationStartingEvent` — before any environment or context work; the `BootstrapContext` exists.
+2. `ApplicationEnvironmentPreparedEvent` — the `Environment` is built and property sources/profiles are resolved, but no beans exist. Ideal for an `EnvironmentPostProcessor`.
+3. `ApplicationContextInitializedEvent` — the context is created and `ApplicationContextInitializer`s have run, before bean definitions load.
+4. `ApplicationPreparedEvent` — bean definitions are loaded but the context is not yet refreshed.
+5. `ContextRefreshedEvent` — the core Spring refresh completed (all singletons instantiated).
+6. `ApplicationStartedEvent` — after refresh, before runners; liveness becomes `CORRECT`.
+7. `ApplicationReadyEvent` — after `ApplicationRunner`/`CommandLineRunner` beans; readiness becomes `ACCEPTING_TRAFFIC`.
+8. `ApplicationFailedEvent` — published if startup throws, so listeners can report before exit.
+
+Because some events fire before the context can resolve beans, early listeners are registered through `META-INF/spring.factories` `ApplicationListener` entries or `SpringApplication.addListeners(...)`, not as `@Bean`s.
+
+## Auto-configuration Ordering and Overriding
+
+Auto-configuration classes are annotated with `@AutoConfiguration`, which combines `@Configuration(proxyBeanMethods = false)` with ordering metadata. Order matters because conditions like `@ConditionalOnMissingBean` are evaluated in sequence:
+
+* `@AutoConfiguration(before = ..., after = ...)` and `@AutoConfigureOrder` position a class relative to others.
+* User configuration is processed **before** auto-configuration, so a bean you define wins over a `@ConditionalOnMissingBean` default.
+* Exclude with `@SpringBootApplication(exclude = X.class)`, `@EnableAutoConfiguration(excludeName = ...)`, or `spring.autoconfigure.exclude`.
+* Inspect decisions via the `ConditionEvaluationReport` (`--debug`) or Actuator's `conditions` endpoint, which lists positive and negative matches with the reason.
+
+This ordering plus `@ConditionalOnMissingBean` is the mechanism that makes Boot "opinionated but overridable": defaults apply only when you have not expressed an opinion.
+
+## Customizing the Bootstrap
+
+`SpringApplicationBuilder` gives fluent control for advanced startups (parent/child contexts, banners, sources):
+
+```java
+new SpringApplicationBuilder(App.class)
+    .web(WebApplicationType.SERVLET)
+    .bannerMode(Banner.Mode.OFF)
+    .initializers(new CustomContextInitializer())
+    .listeners(new CustomListener())
+    .properties("spring.config.import=optional:configserver:")
+    .run(args);
+```
+
+Key extension points: `ApplicationContextInitializer` (mutate the context before refresh), `ApplicationListener` (react to lifecycle events), `EnvironmentPostProcessor` (add property sources), and `BeanFactoryPostProcessor`/`BeanPostProcessor` (definition/instance customization). All are registered in `AutoConfiguration.imports` or `spring.factories` so they load without an active context.
+
+## Failure Analysis
+
+When startup fails, Boot routes the exception through registered `FailureAnalyzer`s, which turn low-level stack traces into actionable messages (for example, "port already in use" or "a required bean could not be found"). Implement `AbstractFailureAnalyzer<T>` and register it so your own libraries emit clear startup diagnostics instead of raw stack traces.
+
+## Startup Performance and AOT
+
+* **`ApplicationStartup`** — set a `BufferingApplicationStartup` to record startup steps and export a flamegraph-friendly timeline of where the context spent time.
+* **Lazy initialization** (`spring.main.lazy-initialization=true`) — defers bean creation to first use, cutting startup time but shifting wiring failures to runtime.
+* **AOT processing** (Boot 3) — generates bean-registration code, proxy classes, and reflection hints ahead of time; it powers **GraalVM native images** (instant startup, low memory) and also speeds JVM startup.
+* **CDS / checkpoint-restore** — Class Data Sharing and Project CRaC (Boot 3.2+) further reduce cold-start latency for serverless and autoscaled workloads.
+
+## Spring Boot 3.x Specifics
+
+Boot 3 raised the baseline to **Java 17**, migrated `javax.*` to the **Jakarta EE 9+** namespace, and adopted the **Micrometer Observation** API for unified metrics and tracing. It added first-class GraalVM native support, `AutoConfiguration.imports` for config discovery, and (3.2+) **virtual threads** via `spring.threads.virtual.enabled=true` on Java 21. Upgrading from Boot 2 chiefly means the Jakarta package move, Security 6 config changes, and replacing Sleuth with Micrometer Tracing.
+
 ## Interview Q&A
 
 **Q: What does `@SpringBootApplication` combine, and what does each part do?**
@@ -115,6 +172,21 @@ A: Both run once after the context is ready; `CommandLineRunner` receives the ra
 
 **Q: How can you diagnose why a bean was or wasn't auto-configured?**
 A: Run with `--debug` (or `debug=true`) to print the `ConditionEvaluationReport` of positive/negative matches, and inspect Actuator's `conditions` endpoint.
+
+**Q: How does Boot choose the embedded server, and how do you switch to Jetty or Undertow?**
+A: With `spring-boot-starter-web`, Tomcat is the default. Exclude it and add `spring-boot-starter-jetty` or `-undertow` to switch; the server is auto-configured from whichever is on the classpath.
+
+**Q: What is a "starter" and what does the parent/BOM provide?**
+A: A starter is a curated dependency aggregator (e.g. `spring-boot-starter-data-jpa`). `spring-boot-dependencies` (imported by `spring-boot-starter-parent`) is a BOM that pins compatible versions, so you omit versions and avoid conflicts.
+
+**Q: How do `@ConditionalOnClass` and `@ConditionalOnMissingBean` enable graceful defaults?**
+A: `@ConditionalOnClass` applies config only when a library is present; `@ConditionalOnMissingBean` backs off when you define your own bean — together they give sensible defaults that you can always override.
+
+**Q: What runs code at startup, and how do you avoid blocking readiness?**
+A: `CommandLineRunner`/`ApplicationRunner` run after the context is ready. For slow work, offload to `@Async` or an `ApplicationReadyEvent` listener so the readiness probe is not delayed.
+
+**Q: How do you package the same app as a WAR for an external container?**
+A: Extend `SpringBootServletInitializer`, override `configure(...)`, set packaging to `war`, and mark the embedded server dependency `provided`. It still runs as an executable JAR too.
 
 ## Interview Notes
 

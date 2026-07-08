@@ -8,6 +8,16 @@ A standalone, revision-ready knowledge base for Spring Boot interviews. Each fil
 
 **Target version:** Spring Boot 3.x (Jakarta EE, Spring Security 6, Micrometer Tracing, `AutoConfiguration.imports`). Legacy equivalents are called out where they still come up in interviews.
 
+## Table of Contents
+
+- [How to Revise](#how-to-revise)
+- [Topics](#topics)
+  - [Core & Container](#core--container)
+  - [Web & API](#web--api)
+  - [Data & Persistence](#data--persistence)
+  - [Service & Integration](#service--integration)
+  - [Operations & Delivery](#operations--delivery)
+
 ## How to Revise
 
 1. Read a topic top-to-bottom once for understanding.

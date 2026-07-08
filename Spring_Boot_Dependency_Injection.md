@@ -11,7 +11,7 @@ Spring registers beans through:
 * classpath scanning of `@Component`, `@Service`, `@Repository`, and `@Controller`
 * `@Configuration` classes and `@Bean` methods
 * XML or Java config imports
-* auto-configuration via `spring.factories`
+* auto-configuration (candidate classes listed in `AutoConfiguration.imports`)
 
 `@SpringBootApplication` includes `@ComponentScan`, and the scan base package is typically the package of the main application class. Bean definitions are represented as `BeanDefinition` objects in the `BeanDefinitionRegistry`.
 
@@ -36,15 +36,84 @@ public class OrderService {
 }
 ```
 
-This is the most reliable style and is fully compatible with Spring’s circular reference detection when combined with `@Lazy`.
+This is the most reliable style. A pure constructor cycle, however, cannot be resolved by Spring's early-reference mechanism and needs `@Lazy` on one dependency (or a redesign) to break it.
 
 ### Setter injection
 
-Use setter injection for optional or replaceable dependencies. Setters are called after bean instantiation, allowing property configuration after construction.
+Use setter injection for optional or replaceable dependencies. Setters run after instantiation, allowing reconfiguration after construction. The trade-off is that fields cannot be `final` and the bean may be observed before it is fully wired.
+
+```java
+@Service
+public class OrderService {
+    private NotificationService notificationService;
+
+    @Autowired
+    public void setNotificationService(NotificationService notificationService) {
+        this.notificationService = notificationService;
+    }
+}
+```
 
 ### Field injection
 
-Field injection uses reflection and is discouraged for production code because it hides dependencies and complicates testing. It is mainly useful for quick prototypes or legacy code.
+Field injection uses reflection and is discouraged for production code because it hides dependencies, prevents `final` fields, and complicates testing (the bean cannot be created with a plain `new`). It is mainly useful for quick prototypes or legacy code.
+
+```java
+@Service
+public class InventoryService {
+    @Autowired
+    private InventoryRepository inventoryRepository;
+}
+```
+
+## Resolving Ambiguous Dependencies
+
+When several beans implement the same type, Spring needs a rule to select one; otherwise it throws `NoUniqueBeanDefinitionException`.
+
+### `@Primary`
+
+Marks one candidate as the default when no qualifier is supplied.
+
+```java
+@Component
+@Primary
+public class CreditCardProcessor implements PaymentProcessor {}
+```
+
+### `@Qualifier`
+
+Selects an exact bean by name at the injection point. More explicit and refactor-visible than relying on a primary.
+
+```java
+public BookingService(@Qualifier("payPalProcessor") PaymentProcessor processor) {
+    this.processor = processor;
+}
+```
+
+### `@Profile`
+
+Registers a bean only when a given profile is active, so environment-specific implementations never collide.
+
+```java
+@Component
+@Profile("prod")
+public class SendGridEmailService implements EmailService {}
+```
+
+### Collection and map injection
+
+Injecting `List<T>` or `Map<String, T>` gathers every bean of that type — a clean basis for strategy or plug-in designs. Ordering is undefined unless controlled with `@Order` or `Ordered`.
+
+```java
+@Component
+public class TaxCalculationEngine {
+    private final List<TaxRule> rules; // each rule ordered with @Order
+
+    public TaxCalculationEngine(List<TaxRule> rules) {
+        this.rules = rules;
+    }
+}
+```
 
 ## Bean Scopes
 
@@ -123,9 +192,23 @@ Proxies allow request-scoped beans to be injected into singleton beans and enabl
 
 ## Advanced DI Features
 
+### `@Bean` factory methods
+
+Declare beans explicitly inside a `@Configuration` class when the type cannot be annotated (third-party classes) or needs custom construction. `@Configuration` classes are CGLIB-enhanced, so repeated calls to a `@Bean` method return the same singleton.
+
+```java
+@Configuration
+public class AppConfig {
+    @Bean
+    public RestClient restClient() {
+        return RestClient.create();
+    }
+}
+```
+
 ### `@ConfigurationProperties` binding
 
-A dedicated binder binds external properties to POJOs. `@ConstructorBinding` creates immutable configuration objects that are validated at startup.
+A dedicated `Binder` binds external properties to POJOs. In Spring Boot 3 a single-constructor `@ConfigurationProperties` type is bound via its constructor automatically, so an explicit `@ConstructorBinding` is no longer required (it is only needed to pick one of several constructors). Immutable, validated configuration objects are created at startup.
 
 ### `@Import`, `ImportSelector`, and `DeferredImportSelector`
 
@@ -134,6 +217,43 @@ A dedicated binder binds external properties to POJOs. `@ConstructorBinding` cre
 ### Auto-configuration conditions
 
 Spring Boot auto-configuration uses `@ConditionalOnBean` and `@ConditionalOnMissingBean` to let user-defined beans override defaults.
+
+## Choosing an Injection Style
+
+| Style | Immutable (`final`) | Testable with plain `new` | Best for | Main caveat |
+|---|---|---|---|---|
+| Constructor | Yes | Yes | Mandatory dependencies (default) | Long constructors hint at a class doing too much |
+| Setter | No | Yes | Optional / reconfigurable dependencies | Bean can be used before it is fully wired |
+| Field | No | No | Prototypes, legacy code | Hides dependencies, hard to test, couples code to Spring |
+
+Rules of thumb:
+
+* Prefer **constructor injection** for almost everything; it guarantees fully initialized, immutable beans.
+* Use **setter injection** only for genuinely optional dependencies.
+* Avoid **field injection** in production code.
+* Reach for `@Primary` or `@Qualifier` only when multiple implementations of a type exist.
+* Use `@Profile` for environment-specific beans and `@Bean` methods for third-party types.
+* Use `@Lazy` for rarely used beans or to break a constructor cycle.
+
+## Interview Q&A
+
+**Q: Why is constructor injection preferred over field injection?**
+A: It enforces mandatory dependencies at construction, allows `final` (immutable) fields, keeps dependencies explicit, and lets you unit-test the class with plain `new` — no reflection or running container required.
+
+**Q: How does Spring resolve a circular dependency between two singletons?**
+A: For setter/field injection it exposes an early reference through the three-level singleton cache, so the second bean receives a partially initialized reference. A pure constructor cycle cannot be resolved this way and fails unless one side is `@Lazy` or the design is refactored.
+
+**Q: What is the difference between `BeanFactoryPostProcessor` and `BeanPostProcessor`?**
+A: `BeanFactoryPostProcessor` modifies bean *definitions/metadata* before any bean is instantiated; `BeanPostProcessor` intercepts each bean *instance* around initialization.
+
+**Q: What happens when two beans match an injection point and neither is primary?**
+A: Spring throws `NoUniqueBeanDefinitionException`. Resolve it with `@Primary`, a `@Qualifier`, or by injecting a collection of all candidates.
+
+**Q: What does `@Lazy` actually do?**
+A: It injects a proxy and defers real bean creation until first use, lowering startup cost and optionally breaking a dependency cycle — at the risk of surfacing initialization errors later at runtime.
+
+**Q: Why must prototype-scoped beans be used carefully?**
+A: Spring does not manage their full lifecycle — `@PreDestroy` is never called — and injecting a prototype into a singleton yields a single instance unless you use a scoped proxy or `ObjectProvider`.
 
 ## Interview Notes
 

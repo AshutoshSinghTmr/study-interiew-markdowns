@@ -14,7 +14,7 @@ Spring Boot is an opinionated extension of Spring Framework designed to remove b
 * `@EnableAutoConfiguration`
 * `@ComponentScan`
 
-Internally, `@EnableAutoConfiguration` imports `AutoConfigurationImportSelector`, which scans `spring.factories` entries to locate auto-configuration classes.
+Internally, `@EnableAutoConfiguration` imports `AutoConfigurationImportSelector`, which reads candidate auto-configuration classes from `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports` (Spring Boot 2.7+/3.x; the legacy `spring.factories` `EnableAutoConfiguration` key is deprecated).
 
 ### Auto-configuration
 
@@ -58,7 +58,7 @@ When using Spring Cloud Config, Boot creates a lightweight bootstrap context fir
 
 ### How auto-configuration classes are discovered
 
-Spring Boot reads `META-INF/spring.factories` from each dependency. `AutoConfigurationImportSelector` aggregates these classes, then `AutoConfigurationMetadataLoader` uses metadata to avoid loading disabled or irrelevant configurations.
+Spring Boot reads the `AutoConfiguration.imports` files (one per dependency, under `META-INF/spring/`) — the modern replacement for the `spring.factories` `EnableAutoConfiguration` key. `AutoConfigurationImportSelector` aggregates these classes, then `AutoConfigurationMetadataLoader` uses metadata to avoid loading disabled or irrelevant configurations.
 
 ### Web application detection
 
@@ -95,6 +95,26 @@ Spring Boot merges property sources by precedence and activates profiles using `
 * Use `spring.main.lazy-initialization=true` carefully to improve startup time, but be aware of delayed failures.
 * Override auto-configuration explicitly with `spring.autoconfigure.exclude` when needed.
 * Use `--debug` to print auto-configuration decisions during startup.
+
+## Interview Q&A
+
+**Q: What does `@SpringBootApplication` combine, and what does each part do?**
+A: `@Configuration` (bean definitions), `@ComponentScan` (discovers components from the main class's package downward), and `@EnableAutoConfiguration` (imports conditional auto-configuration via `AutoConfigurationImportSelector`).
+
+**Q: How does auto-configuration know what to configure?**
+A: Candidate classes listed in `AutoConfiguration.imports` are filtered by `@Conditional` checks (`@ConditionalOnClass`, `@ConditionalOnMissingBean`, `@ConditionalOnProperty`, ...). Only conditions that pass register beans, so your own beans and the classpath drive the result.
+
+**Q: How do you override or disable a specific auto-configuration?**
+A: Define your own bean (most auto-config is `@ConditionalOnMissingBean`), set the relevant property, or exclude it with `@SpringBootApplication(exclude = ...)` / `spring.autoconfigure.exclude`.
+
+**Q: How does Boot decide between a servlet, reactive, or non-web application?**
+A: It inspects the classpath (`webApplicationType`): servlet classes → `AnnotationConfigServletWebServerApplicationContext` with embedded Tomcat/Jetty/Undertow; only reactive classes → `ReactiveWebServerApplicationContext` with Netty; neither → a plain `AnnotationConfigApplicationContext`.
+
+**Q: What is the difference between `CommandLineRunner` and `ApplicationRunner`?**
+A: Both run once after the context is ready; `CommandLineRunner` receives the raw `String[]` args, while `ApplicationRunner` receives a parsed `ApplicationArguments`.
+
+**Q: How can you diagnose why a bean was or wasn't auto-configured?**
+A: Run with `--debug` (or `debug=true`) to print the `ConditionEvaluationReport` of positive/negative matches, and inspect Actuator's `conditions` endpoint.
 
 ## Interview Notes
 

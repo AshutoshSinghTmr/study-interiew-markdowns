@@ -15,9 +15,10 @@ The persistence context is associated with a transaction. It caches managed enti
 
 ### Flush modes
 
-* `AUTO` (default): flushes before queries and commit
+* `AUTO` (default): flushes before matching queries and at commit
 * `COMMIT`: flushes only at commit time
-* `MANUAL`: flushes only on explicit `flush()` calls
+
+The JPA standard `FlushModeType` defines only `AUTO` and `COMMIT`. Hibernate's native `FlushMode` adds `MANUAL` (flush only on an explicit `flush()`) and `ALWAYS`.
 
 ### Dirty checking
 
@@ -41,6 +42,11 @@ Occurs when lazy associations fire separate SQL queries. Avoid it using:
 * batch fetching settings
 * query projections
 
+```java
+@Query("SELECT o FROM Order o JOIN FETCH o.lines WHERE o.status = :status")
+List<Order> findWithLines(@Param("status") OrderStatus status);
+```
+
 ## Caching
 
 ### First-level cache
@@ -63,7 +69,7 @@ Enable with `spring.jpa.properties.hibernate.jdbc.batch_size`. Boot configures J
 
 ### Statement caching
 
-Use `hibernate.statement_cache.size` to reduce statement preparation overhead.
+`PreparedStatement` caching lives at the JDBC driver / connection-pool level, not in Hibernate. With HikariCP and a driver such as PostgreSQL or MySQL, enable it through data-source properties like `spring.datasource.hikari.data-source-properties.cachePrepStmts=true`, `prepStmtCacheSize`, and `prepStmtCacheSqlLimit`.
 
 ### Fetch size
 
@@ -73,7 +79,20 @@ Set `spring.jpa.properties.hibernate.jdbc.fetch_size` for large result sets and 
 
 ### Optimistic locking
 
-Use `@Version` for version-based concurrency control. Hibernate adds a version check to the update statement and increments the version upon success.
+Use `@Version` for version-based concurrency control. Hibernate adds a version check to the update statement and increments the version upon success; a stale update throws `OptimisticLockException`.
+
+```java
+@Entity
+public class Account {
+    @Id
+    private Long id;
+
+    @Version
+    private long version;
+
+    private BigDecimal balance;
+}
+```
 
 ### Pessimistic locking
 
@@ -91,9 +110,15 @@ Use constructor expressions in JPQL or map query results manually with `Tuple` o
 
 ### Entity graphs
 
-`@EntityGraph` defines fetch plans declaratively. The JPA provider uses the graph to optimize SQL and avoid unnecessary joins.
+`@EntityGraph` defines fetch plans declaratively. The JPA provider uses the graph to eagerly load the named associations in a single query and avoid the N+1 problem.
 
-## Query tuning Internals
+```java
+@EntityGraph(attributePaths = {"lines", "customer"})
+@Query("SELECT o FROM Order o WHERE o.id = :id")
+Optional<Order> findDetailById(@Param("id") Long id);
+```
+
+## Query Tuning Internals
 
 ### `@QueryHints`
 
@@ -124,6 +149,26 @@ Implement soft deletes with a boolean flag and Hibernate annotations like `@Wher
 ### JPA event listeners
 
 Use JPA lifecycle callbacks (`@PrePersist`, `@PostLoad`) or Hibernate event listeners for audit logging and entity lifecycle behavior.
+
+## Interview Q&A
+
+**Q: What is the persistence context and how does it relate to the first-level cache?**
+A: It is the `EntityManager`'s set of managed entities within a transaction — and it *is* the first-level cache: repeated loads of the same id return the same instance, and it tracks changes for dirty checking. It is mandatory and cannot be disabled.
+
+**Q: What causes `LazyInitializationException` and how do you fix it properly?**
+A: Accessing a `LAZY` association after the persistence context/transaction has closed. Fix it by fetching what you need inside the transaction — `JOIN FETCH`, `@EntityGraph`, or a DTO projection — rather than relying on Open Session in View.
+
+**Q: What is the N+1 problem and how do you solve it?**
+A: One query loads N parents, then N extra queries load each parent's association. Detect it via SQL logging or Hibernate statistics; solve it with `JOIN FETCH`, `@EntityGraph`, or `@BatchSize`.
+
+**Q: How does optimistic locking differ from pessimistic locking?**
+A: Optimistic (`@Version`) assumes low contention and only checks a version column at update time, failing with `OptimisticLockException` on conflict. Pessimistic (`PESSIMISTIC_WRITE`) takes a database lock up front, blocking others — safer under high contention but with lower concurrency.
+
+**Q: When does Hibernate actually run SQL for a change?**
+A: Not immediately — it queues changes and flushes at the flush point (before matching queries and at commit under `AUTO`). Dirty checking then generates the minimal insert/update/delete statements.
+
+**Q: Why does Spring translate persistence exceptions, and how?**
+A: To decouple callers from provider-specific exceptions. `PersistenceExceptionTranslationPostProcessor` (active on `@Repository` beans) converts them into Spring's consistent, unchecked `DataAccessException` hierarchy.
 
 ## Interview Notes
 

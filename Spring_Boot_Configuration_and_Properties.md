@@ -28,16 +28,18 @@ Spring uses `Environment` for property access and relaxed binding to match names
 
 ### Property source precedence
 
-Spring Boot evaluates sources in predictable order. Later sources override earlier ones.
+Spring Boot evaluates sources in a predictable order; sources higher in the list win over lower ones. The real list is longer (it also includes servlet init params, `SPRING_APPLICATION_JSON`, `RandomValuePropertySource`, and profile-specific files) — the common high-to-low ordering is:
 
-1. `DevTools` properties
-2. `@TestPropertySource` locations
+1. `DevTools` properties (when active)
+2. `@TestPropertySource` / `@SpringBootTest` properties
 3. command line arguments
-4. JNDI attributes
+4. `SPRING_APPLICATION_JSON` properties
 5. Java system properties
 6. OS environment variables
-7. `application.properties` / `application.yml`
-8. `@PropertySource`
+7. profile-specific files (`application-{profile}.yml`)
+8. `application.properties` / `application.yml`
+9. `@PropertySource`
+10. default properties
 
 ### Profiles
 
@@ -51,25 +53,31 @@ Profiles are activated via `spring.profiles.active`, `spring.profiles.include`, 
 
 ```java
 @ConfigurationProperties(prefix = "app")
-@ConstructorBinding
 public class AppProperties {
     private final String name;
     private final Security security;
 
+    // Spring Boot 3 binds via the single constructor automatically;
+    // @ConstructorBinding is only needed to choose among multiple constructors.
     public AppProperties(String name, Security security) {
         this.name = name;
         this.security = security;
     }
 
+    public String getName() { return name; }
+    public Security getSecurity() { return security; }
+
     public static class Security {
         private final boolean enabled;
 
-        public Security(boolean enabled) {
-            this.enabled = enabled;
-        }
+        public Security(boolean enabled) { this.enabled = enabled; }
+
+        public boolean isEnabled() { return enabled; }
     }
 }
 ```
+
+Register it with `@EnableConfigurationProperties(AppProperties.class)` or `@ConfigurationPropertiesScan`.
 
 ### `@Value`
 
@@ -114,11 +122,31 @@ Defines grouped profiles that activate multiple profiles together, useful for la
 
 ### Custom property binding
 
-Implement `Converter` or `PropertyEditorRegistrar` for custom types, and use `@ConstructorBinding` for immutable configuration beans.
+Implement `Converter` or `PropertyEditorRegistrar` for custom types. Immutable configuration beans are bound through their constructor (in Boot 3, `@ConstructorBinding` is only required — at the constructor level — to disambiguate multiple constructors).
 
 ### `EnvironmentPostProcessor`
 
 Create an `EnvironmentPostProcessor` to register custom property sources before the application context refreshes.
+
+## Interview Q&A
+
+**Q: When should you use `@ConfigurationProperties` instead of `@Value`?**
+A: Use `@ConfigurationProperties` for a group of related, hierarchical properties — it gives type safety, relaxed binding, validation (`@Validated`), and IDE metadata. Use `@Value` for a single one-off value or a SpEL expression.
+
+**Q: What is relaxed binding?**
+A: Spring maps one target property to many source formats, so `spring.datasource.url`, `SPRING_DATASOURCE_URL`, `spring.datasource-url`, and `spring.datasourceUrl` all bind to the same field — which is what lets environment variables configure any property.
+
+**Q: How do profile-specific properties work and which wins?**
+A: `application-{profile}.yml` is loaded when that profile is active and overrides the plain `application.yml`. Activate profiles with `spring.profiles.active`; `spring.profiles.group` can pull in several profiles at once.
+
+**Q: What replaced `bootstrap.yml` / the bootstrap context?**
+A: In Boot 2.4+ the `ConfigData` API and `spring.config.import` (e.g. `spring.config.import=configserver:` or `vault:`) replaced the legacy bootstrap context for importing external/remote configuration.
+
+**Q: How do you inject configuration before the context is created?**
+A: Register an `EnvironmentPostProcessor` (declared in `AutoConfiguration.imports`/`spring.factories`) to add or mutate property sources on the `Environment` during startup.
+
+**Q: How do you keep secrets out of the codebase?**
+A: Source them from environment variables, a secret manager, or Vault through `spring.config.import`; never commit them, and keep them out of logs and the Actuator `env`/`info` endpoints (mask with `management.endpoint.env.keys-to-sanitize`).
 
 ## Interview Notes
 

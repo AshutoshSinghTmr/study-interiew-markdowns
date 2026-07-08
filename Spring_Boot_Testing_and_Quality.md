@@ -24,11 +24,29 @@ A solid Spring Boot test strategy includes:
 
 ### `@SpringBootTest` specifics
 
-`SpringBootContextLoader` loads the application context and honors `@TestConfiguration`, active profiles, and properties. The Spring TestContext Framework caches contexts keyed by configuration.
+`SpringBootContextLoader` loads the application context and honors `@TestConfiguration`, active profiles, and properties. Use its `webEnvironment` attribute (`MOCK`, `RANDOM_PORT`, `DEFINED_PORT`, `NONE`) to control whether a real embedded server starts.
 
-## Mocking and slicing
+## Mocking and Slicing
 
-Slice tests narrow the loaded context and improve speed. Use `@MockBean` to replace dependencies not needed for the slice.
+Slice tests narrow the loaded context and improve speed. Replace collaborators outside the slice with a mock — `@MockitoBean` in Boot 3.4+ (the older `@MockBean` is deprecated).
+
+```java
+@WebMvcTest(OrderController.class)
+class OrderControllerTest {
+
+    @Autowired MockMvc mvc;
+    @MockitoBean OrderService orderService; // @MockBean before Boot 3.4
+
+    @Test
+    void returnsOrder() throws Exception {
+        given(orderService.findById(1L)).willReturn(new OrderDto(1L, "NEW"));
+
+        mvc.perform(get("/api/orders/1"))
+           .andExpect(status().isOk())
+           .andExpect(jsonPath("$.status").value("NEW"));
+    }
+}
+```
 
 ### Slicing examples
 
@@ -57,7 +75,7 @@ Use Spring Cloud Contract or Pact for consumer-driven contract testing. Validate
 
 Use `StepVerifier` for Reactor sequences, `WebTestClient` for WebFlux, and `async` support in `MockMvc` for deferred results.
 
-## Internal test mechanics
+## Internal Test Mechanics
 
 ### Context caching
 
@@ -73,6 +91,26 @@ The Spring TestContext Framework caches application contexts keyed by configurat
 * write clear assertions and avoid brittle test setup
 * keep tests isolated and avoid shared mutable state
 * prefer real scenarios over implementation-specific tests
+
+## Interview Q&A
+
+**Q: When should you use `@SpringBootTest` versus a slice test?**
+A: Use a slice (`@WebMvcTest`, `@DataJpaTest`, `@WebFluxTest`) to test one layer with a minimal, fast context; use `@SpringBootTest` for full integration behavior across the whole context, accepting the slower startup.
+
+**Q: What replaced `@MockBean` in recent Spring Boot?**
+A: `@MockitoBean` (and `@MockitoSpyBean`) from Spring Framework 6.2 / Boot 3.4; `@MockBean`/`@SpyBean` are deprecated. Both add or replace a mock bean in the test context.
+
+**Q: How does the TestContext Framework speed up test suites?**
+A: It caches the loaded `ApplicationContext` keyed by configuration (classes, profiles, properties) and reuses it across tests. Anything that changes that key — or `@DirtiesContext` — forces a new context, which is expensive.
+
+**Q: Why prefer Testcontainers over an in-memory database?**
+A: Testcontainers runs the real engine (e.g. PostgreSQL) so tests catch dialect/behavior differences an in-memory DB (H2) would hide; wire container URLs in with `@DynamicPropertySource`.
+
+**Q: How do you test a secured or JSON-serialization concern in isolation?**
+A: Use focused slices — `@WebMvcTest` with `spring-security-test` for auth, `@JsonTest` for serialization — so only the relevant auto-configuration loads.
+
+**Q: How do you test reactive code deterministically?**
+A: Use `StepVerifier` to assert the sequence of emitted signals on a `Mono`/`Flux`, and `WebTestClient` for end-to-end WebFlux endpoints.
 
 ## Interview Notes
 

@@ -130,6 +130,45 @@ Use `repositoryBaseClass` in `@EnableJpaRepositories` to supply a custom base im
 * Reserve native queries for vendor-specific SQL or performance-sensitive statements.
 * Keep repository interfaces focused and delegate complex business logic to service or custom repository classes.
 
+## Choosing the Right Abstraction
+
+* `JpaRepository` for full JPA apps needing CRUD, paging, batching, and convenience methods.
+* `PagingAndSortingRepository` when sorting and pagination are required but you want a narrower API.
+* `CrudRepository` or `ListCrudRepository` for simple CRUD-focused services (`ListCrudRepository` when you prefer `List` over `Iterable`).
+* `Repository` for a minimal, explicit contract that exposes only the operations you declare.
+* Derived queries for straightforward lookups, `@Query` for complex joins or projections, native SQL for vendor-specific statements.
+* Repository fragments for reusable custom behavior; a plain `@Repository` bean when full SQL control is essential.
+
+| Variation | Best use case |
+| :--- | :--- |
+| `Repository` | Strict API contract, minimal exposure |
+| `CrudRepository` | Basic CRUD without extra features |
+| `ListCrudRepository` | CRUD with `List` return semantics |
+| `PagingAndSortingRepository` | Paging and sorting requirements |
+| `JpaRepository` | Feature-rich JPA persistence |
+| Custom fragment | Complex custom behavior with Spring Data wiring |
+| Pure repository bean | Legacy SQL or non-standard persistence |
+
+## Interview Q&A
+
+**Q: How does Spring Data turn a repository interface into a working bean?**
+A: `RepositoryFactorySupport` creates a JDK dynamic proxy for the interface. Calls are routed by an interceptor to derived-query implementations (`PartTreeJpaQuery`), declared `@Query` methods, fragment implementations, or the shared `SimpleJpaRepository` base for CRUD.
+
+**Q: What does `QueryLookupStrategy` control?**
+A: How a query is resolved for a method — `CREATE` (derive from the method name), `USE_DECLARED_QUERY` (require `@Query`), or `CREATE_IF_NOT_FOUND` (the default: try declared, then derive).
+
+**Q: When would you use a repository fragment versus a full custom repository bean?**
+A: Use a fragment (`XxxImpl`) when you want custom behavior *and* still keep Spring Data's derived/declared queries on the same interface. Use a standalone `@Repository` with `JdbcTemplate`/`EntityManager` when the logic is entirely custom or legacy SQL and you do not need the Spring Data proxy.
+
+**Q: What is the difference between `JpaRepository` and `CrudRepository`?**
+A: `JpaRepository` extends `PagingAndSortingRepository` (and `CrudRepository`) and adds JPA-specific operations such as `flush()`, `saveAllAndFlush()`, and `deleteAllInBatch()`, plus `List` return types. `CrudRepository` is the minimal persistence-agnostic CRUD contract.
+
+**Q: How do you build a dynamic query whose predicates are known only at runtime?**
+A: Extend `JpaSpecificationExecutor` and compose `Specification<T>` objects (Criteria API), or use Query by Example for simple probes. Both avoid string concatenation and stay type-safe.
+
+**Q: Why prefer projections/DTOs over returning entities?**
+A: They fetch only the needed columns, reduce payload, and avoid lazy-loading and entity-exposure pitfalls; interface projections can even be pushed into the SQL select list by the provider.
+
 ## Interview Notes
 
 * Describe how Spring Data turns repository interfaces into proxy-backed beans.

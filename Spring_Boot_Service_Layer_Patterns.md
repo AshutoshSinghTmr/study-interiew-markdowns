@@ -8,6 +8,26 @@ The service layer separates business logic from controllers and repositories. It
 
 Spring manages transactions with `@Transactional`, implemented using AOP proxies and `TransactionInterceptor`.
 
+```java
+@Service
+public class TransferService {
+    private final AccountRepository accounts;
+
+    public TransferService(AccountRepository accounts) {
+        this.accounts = accounts;
+    }
+
+    @Transactional
+    public void transfer(Long fromId, Long toId, BigDecimal amount) {
+        Account from = accounts.findById(fromId).orElseThrow();
+        Account to = accounts.findById(toId).orElseThrow();
+        from.debit(amount);
+        to.credit(amount);
+        // managed entities are flushed automatically at commit
+    }
+}
+```
+
 ### Propagation behaviors
 
 * `REQUIRED` (default)
@@ -85,7 +105,7 @@ The service layer validates business rules and translates lower-level exceptions
 
 ## Advanced Topic: AOP and Cross-cutting Concerns
 
-The service layer is a natural place for cross-cutting concerns like security, caching, retries, and metrics.
+The service layer is a natural place for cross-cutting concerns like security, caching, retries, and metrics. See [Spring_Boot_AOP_and_Aspects.md](Spring_Boot_AOP_and_Aspects.md) for the proxy internals in depth.
 
 ### How AOP works
 
@@ -112,6 +132,26 @@ Spring Boot integrates with Resilience4j and Spring Retry to add circuit breaker
 * use `@SpringBootTest` or sliced contexts for integration tests
 * verify transactional behavior with real persistence contexts
 * use `@DataJpaTest` for repository-focused persistence tests
+
+## Interview Q&A
+
+**Q: How does `@Transactional` actually work under the hood?**
+A: Spring wraps the bean in an AOP proxy; `TransactionInterceptor` starts a transaction via a `PlatformTransactionManager` before the method and commits or rolls back afterward, based on the outcome and rollback rules.
+
+**Q: Why doesn't `@Transactional` work when a method calls another method in the same class?**
+A: Self-invocation goes through `this`, not the proxy, so the interceptor never runs. Fix it by injecting the bean into itself, moving the method to another bean, or using AspectJ load-time weaving.
+
+**Q: What is the default rollback behavior and how do you change it?**
+A: Spring rolls back on `RuntimeException` and `Error` but *not* on checked exceptions. Override with `@Transactional(rollbackFor = ...)` or `noRollbackFor`.
+
+**Q: When would you use `REQUIRES_NEW` vs `REQUIRED`?**
+A: `REQUIRED` (default) joins an existing transaction. `REQUIRES_NEW` suspends the current one and runs independently — useful for actions like audit logging that must commit even if the outer transaction rolls back.
+
+**Q: What is the difference between Transaction Script and Domain Model?**
+A: Transaction Script puts procedural logic in service methods (simple, but can grow anemic); Domain Model pushes behavior and invariants into rich entities (better for complex domains). The service layer still owns transactions and orchestration in both.
+
+**Q: Why does advice ordering matter for `@Retryable` and `@Transactional`?**
+A: If retry sits inside the transaction, a retry reuses a transaction that may already be rollback-only. Put retry *outside* (higher precedence) so each attempt gets a fresh transaction.
 
 ## Interview Notes
 

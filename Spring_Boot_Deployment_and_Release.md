@@ -20,13 +20,25 @@ For servlet containers, Boot can build a WAR and deploy it to external Tomcat, J
 
 Use a lightweight base image such as `eclipse-temurin` or `distroless`.
 
-Example Dockerfile:
+Example layered, multi-stage Dockerfile (small runtime image, cache-friendly):
 
 ```dockerfile
-FROM eclipse-temurin:17-jdk-jammy
+# Extract Boot layers from the fat JAR
+FROM eclipse-temurin:17-jre-jammy AS builder
+WORKDIR /app
 ARG JAR_FILE=target/app.jar
 COPY ${JAR_FILE} app.jar
-ENTRYPOINT ["java", "-jar", "/app.jar"]
+RUN java -Djarmode=layertools -jar app.jar extract
+
+# Final image: JRE only, non-root, most-stable layers first
+FROM eclipse-temurin:17-jre-jammy
+WORKDIR /app
+COPY --from=builder /app/dependencies/ ./
+COPY --from=builder /app/spring-boot-loader/ ./
+COPY --from=builder /app/snapshot-dependencies/ ./
+COPY --from=builder /app/application/ ./
+USER 1000
+ENTRYPOINT ["java", "org.springframework.boot.loader.launch.JarLauncher"]
 ```
 
 ### Best practices
@@ -79,7 +91,27 @@ Actuator readiness and liveness probes are essential for Kubernetes and containe
 
 ## Internal Startup Behavior
 
-Boot uses `JarLauncher` with `LaunchedURLClassLoader` to load nested JARs. Native image builds use AOT compilation and adapt spring context initialization for GraalVM.
+Boot uses `JarLauncher` with a dedicated launched class loader to load nested JARs (the loader was reworked in Boot 3.2). Native image builds use AOT compilation and adapt Spring context initialization for GraalVM.
+
+## Interview Q&A
+
+**Q: How does an executable Spring Boot "fat JAR" work?**
+A: The build plugin nests application classes and dependency JARs inside one archive with a `JarLauncher` main class and a custom class loader that reads the nested JARs directly, so `java -jar app.jar` runs without unpacking.
+
+**Q: Why do layered JARs improve Docker builds?**
+A: They split the JAR into layers that change at different rates (dependencies, spring-boot-loader, snapshot-dependencies, application). Copying stable layers first lets Docker cache them, so a code change only rebuilds the small application layer.
+
+**Q: How do you configure a Boot app per environment without rebuilding?**
+A: Externalize config — environment variables (relaxed binding), `SPRING_PROFILES_ACTIVE`, mounted config files, or `spring.config.import` for config server/Vault — so the same image runs everywhere.
+
+**Q: What is the difference between liveness and readiness in Kubernetes?**
+A: Liveness failure restarts the pod; readiness failure removes it from the Service endpoints until it recovers. Boot maps these to Actuator health groups (`probes.enabled=true`).
+
+**Q: What do blue-green and canary deployments give you?**
+A: Blue-green keeps two environments and switches traffic atomically for instant rollback; canary shifts a small percentage of traffic to the new version first to limit blast radius.
+
+**Q: What does a GraalVM native image change about a Boot app?**
+A: AOT processing generates ahead-of-time bean/proxy metadata and reflection hints so the app compiles to a native binary with very fast startup and low memory — at the cost of longer builds and some reflection/dynamic-feature constraints.
 
 ## Interview Notes
 

@@ -34,7 +34,7 @@ Authentication verifies identity; authorization checks access rights.
 
 ### Method security
 
-`@EnableMethodSecurity` or `@EnableGlobalMethodSecurity` registers security advisors that intercept method calls. `MethodSecurityInterceptor` evaluates expressions using `MethodSecurityExpressionHandler`.
+`@EnableMethodSecurity` (Spring Security 6; it supersedes the now-removed `@EnableGlobalMethodSecurity`) registers security advisors that intercept method calls. An `AuthorizationManager`-based interceptor evaluates `@PreAuthorize`/`@PostAuthorize` expressions using `MethodSecurityExpressionHandler`.
 
 ### Password encoding
 
@@ -67,9 +67,45 @@ Use `SecurityFilterChain` to configure URL authorization rules, session manageme
 ### Common patterns
 
 * stateless JWT APIs with `SessionCreationPolicy.STATELESS`
-* custom `SecurityFilterChain` beans instead of extending `WebSecurityConfigurerAdapter`
-* `oauth2ResourceServer().jwt()` for resource servers
-* `http.authorizeHttpRequests()` for URL rules
+* component-style `SecurityFilterChain` beans (Spring Security 6 removed `WebSecurityConfigurerAdapter`)
+* `oauth2ResourceServer(oauth2 -> oauth2.jwt(...))` for resource servers
+* `http.authorizeHttpRequests(...)` for URL rules
+
+```java
+@Configuration
+@EnableWebSecurity
+public class SecurityConfig {
+
+    @Bean
+    SecurityFilterChain api(HttpSecurity http) throws Exception {
+        http
+            .csrf(csrf -> csrf.disable())
+            .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers("/api/public/**").permitAll()
+                .requestMatchers("/api/admin/**").hasRole("ADMIN")
+                .anyRequest().authenticated())
+            .oauth2ResourceServer(oauth2 -> oauth2.jwt(Customizer.withDefaults()));
+        return http.build();
+    }
+
+    @Bean
+    PasswordEncoder passwordEncoder() {
+        return PasswordEncoderFactories.createDelegatingPasswordEncoder();
+    }
+}
+```
+
+For a JWT resource server, point Boot at the issuer or JWK set:
+
+```yaml
+spring:
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: https://auth.example.com/realms/app
+```
 
 ## Identity and session management
 
@@ -88,6 +124,26 @@ For async execution, use `SecurityContextHolder.MODE_INHERITABLETHREADLOCAL` or 
 ### Audit and event handling
 
 Spring Security publishes authentication events and can be extended with `AuthenticationEventPublisher` for auditing.
+
+## Interview Q&A
+
+**Q: How is Spring Security configured in Spring Security 6 (no `WebSecurityConfigurerAdapter`)?**
+A: Declare one or more `SecurityFilterChain` beans that configure `HttpSecurity` with the lambda DSL. Multiple chains can be ordered and matched to different URL patterns.
+
+**Q: How does a request flow through the security filter chain?**
+A: `FilterChainProxy` selects the matching `SecurityFilterChain`; authentication filters build an `Authentication`, `AuthenticationManager`/providers validate it and store it in the `SecurityContextHolder`, then `AuthorizationFilter` enforces access, with `ExceptionTranslationFilter` handling failures.
+
+**Q: What is the difference between authentication and authorization?**
+A: Authentication establishes *who* the caller is (credentials -> `Authentication`); authorization decides *what* they may do (roles/authorities checked at URLs or methods).
+
+**Q: How do you secure a stateless REST API with JWTs?**
+A: Set `SessionCreationPolicy.STATELESS`, disable CSRF for the API, and enable `oauth2ResourceServer().jwt()` with an `issuer-uri`/JWK set so each request's bearer token is validated and turned into an `Authentication`.
+
+**Q: Why is CSRF protection on by default, and when can you disable it?**
+A: It protects browser session-cookie flows from forged state-changing requests. It can be disabled for stateless token-based APIs that do not rely on cookies for authentication.
+
+**Q: How does `DelegatingPasswordEncoder` work?**
+A: It stores an algorithm-id prefix like `{bcrypt}` with each hash, so it can verify legacy encodings and upgrade the default algorithm without breaking existing passwords.
 
 ## Interview Notes
 

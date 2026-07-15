@@ -8,6 +8,8 @@ A standalone, revision-ready knowledge base for Spring Boot interviews. Each fil
 
 **Target version:** Spring Boot 3.x (Jakarta EE, Spring Security 6, Micrometer Tracing, `AutoConfiguration.imports`). Legacy equivalents are called out where they still come up in interviews.
 
+> **Companion guides (same format):** [Java Interview Preparation](java/README.md) (Java 21 LTS) · [Angular Interview Preparation](angular/README.md) (Angular v19/v20+).
+
 ## Table of Contents
 
 - [How to Revise](#how-to-revise)
